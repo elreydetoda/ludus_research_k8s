@@ -1,0 +1,9 @@
+- name: Configure unauth API for MicroK8s
+  when: k8s_flavor == 'microk8s'
+  block:
+    - name: Modify API Server Config
+      ansible.builtin.lineinfile:
+        path: /var/snap/microk8s/current/args/kube-apiserver
+        regexp: '^--anonymous-auth='
+        line: '--anonymous-auth=true'
+
