@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://docs.ludus.cloud/schemas/range-config.json
+ludus:
+  - vm_name: "{{ range_id }}-k8s-microk8s"
+    hostname: "{{ range_id }}-k8s-01"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20
+    ip_last_octet: 10
+    ram_gb: 4
+    cpus: 8
+    linux: true
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - name: install_k8s
+    role_vars:
+      k8s_flavor: microk8s
+      telemetry: falco
+      enable_unauth_api: true
+      microk8s_user: localuser
+      microk8s_addons:
+        - dns 
+        - storage
+
+
