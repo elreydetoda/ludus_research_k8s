@@ -1,2 +1,7 @@
 ---
 # defaults file for install_microk8s
+# adjust version / arch if needed
+kubeletctl_version: "v1.13"
+kubeletctl_install_path: "/usr/local/bin/kubeletctl"
+microk8s_base: "/var/snap/microk8s/"
+microk8s_apiserver: "/var/snap/microk8s/current/args/kube-apiserver"

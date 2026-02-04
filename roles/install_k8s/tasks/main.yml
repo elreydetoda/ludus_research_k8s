@@ -1,7 +1,11 @@
 - name: "Install MicroK8s"
   ansible.builtin.include_tasks: microk8s.yml
-  when: k8s_flavor | default('microk8s') == 'microk8s'
+  when: k8s_flavor == 'microk8s'
 
 - name: Configure unauthenticated API Access
   ansible.builtin.include_tasks: unauth_api.yml 
   when: enable_unauth_api is true
+
+- name: Install falco
+  ansible.builtin.include_tasks: falco-setup.yml
+  when: telemetry == 'falco'

@@ -12,7 +12,7 @@ ludus:
       snapshot: false
       block_internet: false
     roles:
-      - name: install_k8s
+      - install_k8s
     role_vars:
       k8s_flavor: microk8s
       telemetry: falco

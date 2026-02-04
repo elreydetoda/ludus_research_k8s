@@ -6,4 +6,17 @@
         path: /var/snap/microk8s/current/args/kube-apiserver
         regexp: '^--anonymous-auth='
         line: '--anonymous-auth=true'
-
+    - name: Modify Kubelet API Config
+      ansible.builtin.lineinfile:
+        path: /var/snap/microk8s/current/args/kubelet
+        regexp: '^--anonymous-auth='
+        line: '--anonymous-auth=true'
+    - name: Restart APIs 
+      ansible.builtin.systemd_service:
+        name: snap.microk8s.daemon-kubelite.service
+        state: restarted
+    - name: Install Kubeletctl
+      ansible.builtin.get_url:
+        url: "https://github.com/cyberark/kubeletctl/releases/download/{{ kubeletctl_version }}/kubeletctl_linux_amd64"
+        dest: "{{ kubeletctl_install_path }}"
+        mode: '0755'
