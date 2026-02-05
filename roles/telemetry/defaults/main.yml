@@ -1,0 +1,5 @@
+---
+# defaults file for telemetry
+
+microk8s_base: "/var/snap/microk8s/"
+microk8s_apiserver: "/var/snap/microk8s/current/args/kube-apiserver"

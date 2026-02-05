@@ -13,13 +13,35 @@ ludus:
       block_internet: false
     roles:
       - install_k8s
+      - telemetry
     role_vars:
       k8s_flavor: microk8s
-      telemetry: falco
+      telemetry_stack: falco
+      telemetry_role: agent
       enable_unauth_api: true
       microk8s_user: localuser
       microk8s_addons:
         - dns 
         - storage
+  - vm_name: "{{ range_id }}-k8s-logs"
+    hostname: "{{ range_id }}-logs-01"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20              
+    ip_last_octet: 11     
+    cpus: 2
+    ram_gb: 2
+    linux: true
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - telemetry   
+    role_vars:
+      telemetry_stack: falco
+      telemetry_role: ui
+      log_user: localuser
+      sidekick_listen_port: 2801
+      sidekick_ui_port: 2802
+
 
 

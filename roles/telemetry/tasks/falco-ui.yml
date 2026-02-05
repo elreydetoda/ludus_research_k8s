@@ -1,0 +1,64 @@
+- name: Install Docker
+  block:
+    - name: Install required packages
+      ansible.builtin.apt:
+        pkg:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+        update_cache: yes
+    - name: add GPG key
+      ansible.builtin.apt_key:
+        url: "https://download.docker.com/linux/ubuntu/gpg"
+        state: present
+    - name: Add Docker repo
+      ansible.builtin.apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu focal stable
+        state: present
+    - name: Install Docker
+      ansible.builtin.apt:
+        pkg: 
+          - docker-ce
+          - docker-compose 
+        state: latest
+        update_cache: true
+- name: Install falcosidekick-ui
+  block:
+    - name: Create falco-network
+      community.docker.docker_network:
+        name: falco-net
+    - name: Pull falcosidekick
+      community.docker.docker_image_pull:
+        name: falcosecurity/falcosidekick
+    - name: Start falcosidekick
+      community.docker.docker_container:
+        name: falcosidekick
+        image: falcosecurity/falcosidekick
+        networks:
+          - name: falco-net
+        published_ports:
+          - "2801:2801"
+    - name: Pull Redis image
+      community.docker.docker_image_pull:
+        name: redislabs/redisearch:2.2.4
+    - name: Start Redis 
+      community.docker.docker_container:
+        name: redis
+        image: redislabs/redisearch:2.2.4
+        networks:
+          - name: falco-net
+    - name: Pull Falco image
+      community.docker.docker_image_pull:
+        name: falcosecurity/falcosidekick-ui
+    - name: Start falcosidekick-ui
+      community.docker.docker_container:
+        name: falcosidekick-ui
+        image: falcosecurity/falcosidekick-ui
+        networks:
+          - name: falco-net
+        published_ports:
+          - "2802:2802"
+        env: 
+          FALCOSIDEKICK_UI_REDIS_URL: "redis:6379"

@@ -6,6 +6,3 @@
   ansible.builtin.include_tasks: unauth_api.yml 
   when: enable_unauth_api is true
 
-- name: Install falco
-  ansible.builtin.include_tasks: falco-setup.yml
-  when: telemetry == 'falco'

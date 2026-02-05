@@ -1,0 +1,21 @@
+---
+- name: "Falco agent on this node"
+  ansible.builtin.include_tasks: falco-agent.yml
+  when:
+    - telemetry_stack == 'falco'
+    - telemetry_role in ['agent', 'full']
+
+- name: "Falco Sidekick UI on this node"
+  ansible.builtin.include_tasks: falco-ui.yml
+  when:
+    - telemetry_stack == 'falco'
+    - telemetry_role in ['ui', 'full']
+
+#- name: "Loki stack on this node"
+#  ansible.builtin.include_tasks: loki.yml
+#  when:
+#    - telemetry_stack == 'loki'
+
+# later:
+# - include_tasks: elk.yml when telemetry_stack == 'elk'
+
