@@ -1,28 +1,5 @@
 # yaml-language-server: $schema=https://docs.ludus.cloud/schemas/range-config.json
 ludus:
-  - vm_name: "{{ range_id }}-k8s-microk8s"
-    hostname: "{{ range_id }}-k8s-01"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20
-    ip_last_octet: 10
-    ram_gb: 4
-    cpus: 8
-    linux: true
-    testing:
-      snapshot: false
-      block_internet: false
-    roles:
-      - install_k8s
-      - telemetry
-    role_vars:
-      k8s_flavor: microk8s
-      telemetry_stack: falco
-      telemetry_role: agent
-      enable_unauth_api: true
-      microk8s_user: localuser
-      microk8s_addons:
-        - dns 
-        - storage
   - vm_name: "{{ range_id }}-k8s-logs"
     hostname: "{{ range_id }}-logs-01"
     template: ubuntu-24.04-x64-server-template
@@ -35,13 +12,73 @@ ludus:
       snapshot: false
       block_internet: false
     roles:
-      - telemetry   
+      - telemetry
     role_vars:
       telemetry_stack: falco
       telemetry_role: ui
-      log_user: localuser
-      sidekick_listen_port: 2801
-      sidekick_ui_port: 2802
+      telemetry_user: localuser
+  - vm_name: "{{ range_id }}-k8s-microk8s"
+    hostname: "{{ range_id }}-k8s-01"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20
+    ip_last_octet: 10
+    ram_gb: 4
+    cpus: 8
+    linux: true
+    ansible_groups:
+      - controller
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - install_k8s
+      - telemetry
+    role_vars:
+      k8s_flavor: microk8s
+      multinode: true
+      control_node: true
+      microk8s_user: localuser
+      telemetry_stack: falco
+      telemetry_role: agent
+      telemetry_hostname: "{{ range_id }}-logs-01"
+  - vm_name: "{{ range_id }}-k8s-02"
+    hostname: "{{ range_id }}-k8s-02"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20
+    ip_last_octet: 12
+    ram_gb: 4
+    cpus: 8
+    linux: true
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - install_k8s
+    role_vars:
+      k8s_flavor: microk8s
+      microk8s_user: localuser
+      multinode: true
+      worker_only: true
+  - vm_name: "{{ range_id }}-k8s-03"
+    hostname: "{{ range_id }}-k8s-03"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20
+    ip_last_octet: 13
+    ram_gb: 4
+    cpus: 8
+    linux: true
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - install_k8s
+    role_vars:
+      k8s_flavor: microk8s
+      microk8s_user: localuser
+      multinode: true
+      node: true
+
+
 
 
 

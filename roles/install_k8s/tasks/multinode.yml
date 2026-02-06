@@ -1,0 +1,22 @@
+- name: Get microk8s cluster invite
+  ansible.builtin.shell:
+    cmd: microk8s add-node --token 0123456789abcdef0123456789abcdef --token-ttl 3600 | awk '/microk8s join/{print; exit}'
+  register: microk8s_invite
+  when:
+    - k8s_flavor == 'microk8s'
+    - control_node is true
+
+- name: Join microk8s cluster as worker
+  ansible.builtin.command:
+    cmd: "{{ hostvars[groups['controller'][0]].microk8s_invite.stdout }} --worker"
+  when:
+    - k8s_flavor == 'microk8s'
+    - worker_only is true
+
+- name: Join microk8s cluster as full node
+  ansible.builtin.command:
+    cmd: "{{ hostvars[groups['controller'][0]].microk8s_invite.stdout }}"
+  when:
+    - k8s_flavor == 'microk8s'
+    - node is true
+

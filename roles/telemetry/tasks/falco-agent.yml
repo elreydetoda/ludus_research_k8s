@@ -20,28 +20,38 @@
 - name: Install Falco via Helm
   kubernetes.core.helm:
     update_repo_cache: true
-    name: falcosecurity
-    chart_ref: falcosecurity
+    name: falco
+    chart_ref: falcosecurity/falco
     release_namespace: falco
     create_namespace: true
+    set_values:
+      - value: tty=true
     values_files:
       - "/home/{{ microk8s_user }}/values.yaml"
+    values:
+      falco:
+        http_output:
+          url: "http://{{ telemetry_hostname }}:2801/"
     kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+ 
 
 - name: Configure k8s audit pipeline for Falco
   block:
     - name: Install k8saudit collector
       kubernetes.core.helm:
+        update_repo_cache: true
         name: k8s-metacollector
         chart_ref: falcosecurity/k8s-metacollector
         release_namespace: falco
         create_namespace: true
         kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+        state: present
 
     - name: Get k8saudit webhook cluster IP
       ansible.builtin.command:
         cmd: >
-          microk8s kubectl get svc falcosecurity-k8saudit-webhook
+          microk8s kubectl get svc falco-k8saudit-webhook
           -n falco
           -o jsonpath='{.spec.clusterIP}'
       register: webhookIP
@@ -50,7 +60,7 @@
     - name: Get k8saudit webhook port
       ansible.builtin.command:
         cmd: >
-          microk8s kubectl get svc falcosecurity-k8saudit-webhook
+          microk8s kubectl get svc falco-k8saudit-webhook
           -n falco
           -o jsonpath='{.spec.ports[0].port}'
       register: webhookPort

@@ -1,0 +1,30 @@
+#docker-compose.yml
+services:
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: falco-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  falcosidekick:
+    image: falcosecurity/falcosidekick:latest
+    container_name: falcosidekick
+    restart: unless-stopped
+    environment:
+      - DEBUG=true
+      - WEBUI_URL=http://falcosidekick-ui:2802
+    ports:
+      - "2801:2801"
+
+  falcosidekick-ui:
+    image: falcosecurity/falcosidekick-ui:latest
+    container_name: falcosidekick-ui
+    restart: unless-stopped
+    environment:
+      - FALCOSIDEKICK_UI_DISABLEAUTH=true
+      - FALCOSIDEKICK_UI_REDIS_URL=redis:6379
+    ports:
+      - "2802:2802"
+    depends_on:
+      - falcosidekick

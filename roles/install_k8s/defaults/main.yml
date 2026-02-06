@@ -5,3 +5,6 @@ kubeletctl_version: "v1.13"
 kubeletctl_install_path: "/usr/local/bin/kubeletctl"
 microk8s_base: "/var/snap/microk8s/"
 microk8s_apiserver: "/var/snap/microk8s/current/args/kube-apiserver"
+worker_only: false
+node: false
+multinode: false

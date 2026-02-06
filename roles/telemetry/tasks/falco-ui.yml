@@ -20,45 +20,24 @@
     - name: Install Docker
       ansible.builtin.apt:
         pkg: 
-          - docker-ce
-          - docker-compose 
+          - docker.io
+          - docker-compose-plugin
         state: latest
         update_cache: true
+    - name: add user to docker group
+      ansible.builtin.user:
+        user: "{{ telemetry_user }}"
+        group: docker
 - name: Install falcosidekick-ui
   block:
-    - name: Create falco-network
-      community.docker.docker_network:
-        name: falco-net
-    - name: Pull falcosidekick
-      community.docker.docker_image_pull:
-        name: falcosecurity/falcosidekick
-    - name: Start falcosidekick
-      community.docker.docker_container:
-        name: falcosidekick
-        image: falcosecurity/falcosidekick
-        networks:
-          - name: falco-net
-        published_ports:
-          - "2801:2801"
-    - name: Pull Redis image
-      community.docker.docker_image_pull:
-        name: redislabs/redisearch:2.2.4
-    - name: Start Redis 
-      community.docker.docker_container:
-        name: redis
-        image: redislabs/redisearch:2.2.4
-        networks:
-          - name: falco-net
-    - name: Pull Falco image
-      community.docker.docker_image_pull:
-        name: falcosecurity/falcosidekick-ui
-    - name: Start falcosidekick-ui
-      community.docker.docker_container:
-        name: falcosidekick-ui
-        image: falcosecurity/falcosidekick-ui
-        networks:
-          - name: falco-net
-        published_ports:
-          - "2802:2802"
-        env: 
-          FALCOSIDEKICK_UI_REDIS_URL: "redis:6379"
+    - name: Copy docker-compose file 
+      ansible.builtin.copy:
+        src: ./deps/docker-compose.yml
+        dest: "/home/{{ telemetry_user }}/docker-compose.yml"
+        mode: "0644"
+        owner: "{{ telemetry_user }}"
+        group: "{{ telemetry_user }}"
+    - name: Run docker-compose
+      community.docker.docker_compose_v2:
+        project_src: "/home/{{ telemetry_user }}"
+      register: output
