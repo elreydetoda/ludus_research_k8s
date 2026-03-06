@@ -1,0 +1,56 @@
+- name: Installing Pre-requisites
+  ansible.builtin.apt:
+    pkg:
+      - golang-go
+      - etcd-client
+    state: present
+
+- name: Install kubetcd 
+  ansible.builtin.git:
+    repo: 'https://github.com/nccgroup/kubetcd.git'
+    dest: "/home/{{ microk8s_user }}/kubetcd"
+    update: no
+
+- name: Find files in cmd directory
+  ansible.builtin.find:
+    paths: "/home/{{ microk8s_user }}/kubetcd/cmd"
+    recurse: yes
+    file_type: file
+  register: cmd_files
+
+- name: Edit source files for microk8s compatibility
+  ansible.builtin.replace:
+    path: "{{ item[0].path }}"
+    regexp: "{{ item[1].regexp }}"
+    replace: "{{ item[1].replace }}"
+  loop: "{{ cmd_files.files | product(replacements) | list }}"
+  vars:
+    replacements:
+      - { regexp: '2379', replace: '12379' }
+      - { regexp: '/etc/kubernetes/pki/etcd/ca.crt', replace: '/var/snap/microk8s/current/certs/ca.crt' }
+      - { regexp: '/etc/kubernetes/pki/etcd/server.key', replace: '/var/snap/microk8s/current/certs/server.key' }
+      - { regexp: '/etc/kubernetes/pki/etcd/server.crt', replace: '/var/snap/microk8s/current/certs/server.crt' }
+
+- name: Install with go
+  ansible.builtin.command: "go build -buildvcs=false -o /usr/local/bin/kubetcd ."
+  args:
+    chdir: "/home/{{ microk8s_user }}/kubetcd"
+    creates: /usr/local/bin/kubetcd
+  
+
+- name: Get Rules
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/falco/rules/etcd-rules.yaml"
+    dest: "/home/{{ microk8s_user }}/rules.d"
+
+- name: Set ETCDCTL variables in bashrc
+  ansible.builtin.lineinfile:
+    path: "/home/{{ microk8s_user }}/.bashrc"
+    line: "{{ item }}"
+    create: true
+    state: present
+  loop:
+    - 'export ETCDCTL_ENDPOINTS="https://127.0.0.1:12379"'
+    - 'export ETCDCTL_CACERT="/var/snap/microk8s/current/certs/ca.crt"'
+    - 'export ETCDCTL_CERT="/var/snap/microk8s/current/certs/server.crt"'
+    - 'export ETCDCTL_KEY="/var/snap/microk8s/current/certs/server.key"'

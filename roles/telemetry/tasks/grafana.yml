@@ -1,0 +1,144 @@
+---
+- name: Install Helm
+  community.general.snap:
+    name: helm
+    classic: true
+    state: present
+- name: Install pip3
+  ansible.builtin.apt:
+    name:
+      - python3-pip
+      - python3-venv
+    state: present
+    update_cache: yes
+- name: install pre-requisites
+  become: true
+  become_user: "{{ microk8s_user }}"
+  ansible.builtin.pip:
+    name:
+      - virtualenv
+      - openshift
+      - pyyaml
+      - kubernetes 
+    virtualenv: "/home/{{ microk8s_user }}/.venv"
+    virtualenv_command: /usr/bin/python3 -m venv
+
+- name: Configure falcosidekick
+  become: true
+  become_user: "{{ microk8s_user }}"
+  block: 
+    - name: Add falcosidekick
+      kubernetes.core.helm:
+        name: falcosidekick
+        chart_ref: falcosecurity/falcosidekick
+        release_namespace: falco
+        values:
+          enabled: true
+          replicaCount: 1
+          service:
+            type: ClusterIP
+            port: 2801
+          config:
+            debug: true
+            loki:
+              hostport: "http://loki.grafana.svc.cluster.local:3100"
+
+- name: Configure Loki and Grafana
+  become: true
+  become_user: "{{ microk8s_user }}"
+  block:
+    - name: Add Grafana Helm repo
+      kubernetes.core.helm_repository:
+        name: grafana
+        repo_url: https://grafana.github.io/helm-charts
+    - name: Deploy Loki
+      kubernetes.core.helm:
+        update_repo_cache: true
+        name: loki
+        chart_ref: "grafana/loki"
+        release_namespace: grafana
+        create_namespace: true
+        values:
+          deploymentMode: SingleBinary
+          service:
+            type: NodePort
+            nodePort: 31000
+            port: 3100
+          test:
+            enabled: false
+          lokiCanary:
+            enabled: false
+          loki:
+            auth_enabled: false
+            commonConfig:
+              replication_factor: 1
+            schemaConfig:
+              configs:
+                - from: "2024-04-01"
+                  store: tsdb
+                  object_store: s3
+                  schema: v13
+                  index:
+                    prefix: loki_index_
+                    period: 24h
+            limits_config:
+              allow_structured_metadata: true
+              volume_enabled: true
+            ruler:
+              enable_api: true
+            pattern_ingester:
+              enabled: true
+          minio:
+            enabled: true
+          singleBinary:
+            replicas: 1
+          backend:
+            replicas: 0
+          read:
+            replicas: 0
+          write:
+            replicas: 0
+          ingester:
+            replicas: 0
+          querier:
+            replicas: 0
+          queryFrontend:
+            replicas: 0
+          queryScheduler:
+            replicas: 0
+          distributor:
+            replicas: 0
+          compactor:
+            replicas: 0
+          indexGateway:
+            replicas: 0
+          bloomCompactor:
+            replicas: 0
+          bloomGateway:
+            replicas: 0
+    - name: Deploy Grafana
+      kubernetes.core.helm:
+        name: grafana
+        chart_ref: "grafana/grafana"
+        release_namespace: grafana
+        create_namespace: false
+        values:
+           adminPassword: admin
+           service:
+            type: NodePort
+            nodePort: 30147
+           datasources:
+            datasources.yaml:
+              apiVersion: 1
+              datasources:
+                - name: Loki
+                  type: loki
+                  access: proxy
+                  url: "http://loki.grafana.svc.cluster.local:3100"
+                  isDefault: true
+  
+
+      
+        
+
+

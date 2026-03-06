@@ -1,8 +1,14 @@
 - name: "Install MicroK8s"
   ansible.builtin.include_tasks: microk8s.yml
-  when: k8s_flavor == 'microk8s'
 
 - name: Configure unauthenticated API Access
   ansible.builtin.include_tasks: unauth_api.yml 
   when: enable_unauth_api is true
 
+- name: Configure ETCD exposure
+  ansible.builtin.include_tasks: unauth_etcd.yml
+  when: unauth_etcd is true and not multinode
+
+- name: Configure demo pod with writable hostmount
+  ansible.builtin.include_tasks: pod_hostpath.yml
+  when: pod_hostpath is true

@@ -1,0 +1,18 @@
+apiVersion: v2
+name: telemetry-stack
+version: 0.1.0
+type: application
+
+dependencies:
+  - name: falco
+    version: "*"
+    repository: "https://falcosecurity.github.io/charts"
+  - name: falcosidekick
+    version: "*"
+    repository: "https://falcosecurity.github.io/charts"
+  - name: loki
+    version: "*"
+    repository: "https://grafana.github.io/helm-charts"
+  - name: grafana
+    version: "*"
+    repository: "https://grafana.github.io/helm-charts"

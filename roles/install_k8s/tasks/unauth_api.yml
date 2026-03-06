@@ -1,5 +1,4 @@
-- name: Configure unauth API for MicroK8s
-  when: k8s_flavor == 'microk8s'
+- name: Configure unauth API
   block:
     - name: Modify API Server Config
       ansible.builtin.lineinfile:
@@ -20,3 +19,8 @@
         url: "https://github.com/cyberark/kubeletctl/releases/download/{{ kubeletctl_version }}/kubeletctl_linux_amd64"
         dest: "{{ kubeletctl_install_path }}"
         mode: '0755'
+
+- name: Get Anon Rules
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/falco/rules/anonymous-auth-apis.yaml"
+    dest: "/home/{{ microk8s_user }}/rules.d/"

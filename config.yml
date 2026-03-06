@@ -1,23 +1,6 @@
 # yaml-language-server: $schema=https://docs.ludus.cloud/schemas/range-config.json
 ludus:
-  - vm_name: "{{ range_id }}-k8s-logs"
-    hostname: "{{ range_id }}-logs-01"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20              
-    ip_last_octet: 11     
-    cpus: 2
-    ram_gb: 2
-    linux: true
-    testing:
-      snapshot: false
-      block_internet: false
-    roles:
-      - telemetry
-    role_vars:
-      telemetry_stack: falco
-      telemetry_role: ui
-      telemetry_user: localuser
-  - vm_name: "{{ range_id }}-k8s-microk8s"
+  - vm_name: "{{ range_id }}-k8s-01"
     hostname: "{{ range_id }}-k8s-01"
     template: ubuntu-24.04-x64-server-template
     vlan: 20
@@ -25,58 +8,22 @@ ludus:
     ram_gb: 4
     cpus: 8
     linux: true
-    ansible_groups:
-      - controller
     testing:
       snapshot: false
       block_internet: false
     roles:
-      - install_k8s
+      - install_k8s 
       - telemetry
     role_vars:
-      k8s_flavor: microk8s
-      multinode: true
-      control_node: true
-      microk8s_user: localuser
-      telemetry_stack: falco
+      pod_hostpath: true
       telemetry_role: agent
-      telemetry_hostname: "{{ range_id }}-logs-01"
-  - vm_name: "{{ range_id }}-k8s-02"
-    hostname: "{{ range_id }}-k8s-02"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20
-    ip_last_octet: 12
-    ram_gb: 4
-    cpus: 8
-    linux: true
-    testing:
-      snapshot: false
-      block_internet: false
-    roles:
-      - install_k8s
-    role_vars:
-      k8s_flavor: microk8s
-      microk8s_user: localuser
-      multinode: true
-      worker_only: true
-  - vm_name: "{{ range_id }}-k8s-03"
-    hostname: "{{ range_id }}-k8s-03"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20
-    ip_last_octet: 13
-    ram_gb: 4
-    cpus: 8
-    linux: true
-    testing:
-      snapshot: false
-      block_internet: false
-    roles:
-      - install_k8s
-    role_vars:
-      k8s_flavor: microk8s
-      microk8s_user: localuser
-      multinode: true
-      node: true
+      ui: grafana
+      microk8s_addons:
+        - dns
+        - storage
+
+
+
 
 
 

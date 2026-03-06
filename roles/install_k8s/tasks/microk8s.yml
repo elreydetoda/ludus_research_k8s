@@ -8,17 +8,19 @@
     name: "{{ microk8s_user }}"
     groups: microk8s
     append: true
-
+- name: Reset SSH connection so group membership applies
+  ansible.builtin.meta: reset_connection
 - name: Adding node to cluster
   ansible.builtin.include_tasks: multinode.yml
   when: multinode is true
 
 - name: Cluster Configruation
   block:
-#    - name: Disable ha-cluster
-#      ansible.builtin.command:
-#        cmd: microk8s disable ha-cluster --force
- #     ignore_errors: true
+    - name: Disable ha-cluster
+      ansible.builtin.command:
+        cmd: microk8s disable ha-cluster --force
+      when: not multinode
+      ignore_errors: true
     - name: Wait for microk8s to be ready
       ansible.builtin.command:
         cmd: microk8s status --wait-ready
@@ -53,4 +55,18 @@
         daemon_reload: true
         state: restarted
   
+
+- name: Install Helm
+  community.general.snap:
+    name: helm
+    channel: 3.7/stable
+    classic: true
+
+- name: Create a rules directory
+  ansible.builtin.file:
+    path: "/home/{{ microk8s_user }}/rules.d"
+    state: directory
+    mode: '0755'
+    owner: "{{ microk8s_user }}"
+    group: "{{ microk8s_user }}"
 

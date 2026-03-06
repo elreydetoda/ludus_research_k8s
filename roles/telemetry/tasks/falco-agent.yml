@@ -1,23 +1,15 @@
 ---
-- name: Install Helm
-  community.general.snap:
-    name: helm
-    classic: true
 
 - name: Add falcosecurity chart repo
+  become: true
+  become_user: "{{ microk8s_user }}"
   kubernetes.core.helm_repository:
     name: falcosecurity
     repo_url: "https://falcosecurity.github.io/charts"
 
-- name: Get Falco values.yaml config
-  ansible.builtin.copy:
-    src: ./deps/values-agent.yaml
-    dest: "/home/{{ microk8s_user }}/values.yaml"
-    mode: "0644"
-    owner: "{{ microk8s_user }}"
-    group: "{{ microk8s_user }}"
-
 - name: Install Falco via Helm
+  become: true
+  become_user: "{{ microk8s_user }}"
   kubernetes.core.helm:
     update_repo_cache: true
     name: falco
@@ -26,17 +18,70 @@
     create_namespace: true
     set_values:
       - value: tty=true
-    values_files:
-      - "/home/{{ microk8s_user }}/values.yaml"
     values:
+      driver:
+        enabled: true
+        kind: modern_ebpf
+      collectors:
+        kubernetes:
+          enabled: true
       falco:
+        load_plugins:
+          - k8saudit
+          - json
+        plugins:
+          - name: k8saudit
+            library_path: libk8saudit.so
+            open_params: "http://:9765/k8s-audit"
+          - name: json
+            library_path: libjson.so
+            init_config: ""
+        rule_matching: all
+        json_output: true
+        json_include_output_property: true
         http_output:
+          enabled: true
           url: "http://{{ telemetry_hostname }}:2801/"
+          keep_alive: true
+          insecure: true
+      services:
+        - name: k8saudit-webhook
+          type: NodePort
+          ports:
+            - port: 9765
+              nodePort: 30007
+              protocol: TCP
+      falcoctl:
+        artifact:
+          install:
+            enabled: true
+          follow:
+            enabled: true
+        config:
+          artifact:
+            allowedTypes:
+              - rulesfile
+              - plugin
+            install:
+              resolveDeps: true
+              refs:
+                - falco-rules:5
+                - k8saudit-rules:0
+                - k8saudit:0
+                - json:0
+            follow:
+              refs:
+                - falco-rules:5
+                - k8saudit-rules:0
+                - k8saudit:0
+                - json:0
     kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
     state: present
  
 
 - name: Configure k8s audit pipeline for Falco
+  become: true
+  become_user: "{{ microk8s_user }}"
   block:
     - name: Install k8saudit collector
       kubernetes.core.helm:
@@ -69,12 +114,12 @@
     - name: Get webhook config
       ansible.builtin.get_url:
         url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/lab-setup/webhook-config.yaml"
-        dest: "{{ microk8s_base }}/current/args/webhook-config.yaml"
+        dest: "{{ microk8s_base }}current/args/webhook-config.yaml"
 
     - name: Get audit policy
       ansible.builtin.get_url:
         url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/lab-setup/audit-policy.yaml"
-        dest: "{{ microk8s_base }}/current/args/audit-policy.yaml"
+        dest: "{{ microk8s_base }}current/args/audit-policy.yaml"
 
     - name: Update webhook URL in webhook config
       ansible.builtin.lineinfile:
@@ -85,13 +130,13 @@
     - name: Add audit log path to API server
       ansible.builtin.lineinfile:
         path: "{{ microk8s_apiserver }}"
-        line: "--audit-log-path={{ microk8s_base }}/common/var/log/kube-apiserver-audit.log"
+        line: "--audit-log-path={{ microk8s_base }}common/var/log/kube-apiserver-audit.log"
         create: true
 
     - name: Add audit webhook file path to API server
       ansible.builtin.lineinfile:
         path: "{{ microk8s_apiserver }}"
-        line: "--audit-webhook-config-file={{ microk8s_base }}/current/args/webhook-config.yaml"
+        line: "--audit-webhook-config-file={{ microk8s_base }}current/args/webhook-config.yaml"
         create: true
 
     - name: Add audit policy file path to API server
@@ -101,8 +146,53 @@
         create: true
 
     - name: Restart MicroK8s API server
+      become: true
+      become_user: root
+      become_method: sudo
       ansible.builtin.systemd_service:
         name: snap.microk8s.daemon-kubelite.service
         daemon_reload: true
         state: restarted
+
+- name: Find rule files in rules.d
+  become: true
+  become_user: "{{ microk8s_user }}"
+  ansible.builtin.find:
+    paths: "/home/{{ microk8s_user }}/rules.d"
+    patterns: "*.yaml,*.yml"
+  register: rule_files
+
+- name: Apply custom Falco rules from rules.d
+  become: true
+  become_user: "{{ microk8s_user }}"
+  when: rule_files.files | length > 0
+  block:
+    - name: Read rule file contents
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      loop: "{{ rule_files.files }}"
+      register: rule_contents
+
+    - name: Build custom rules dict
+      ansible.builtin.set_fact:
+        custom_rules_dict: >-
+          {{ custom_rules_dict | default({}) | combine(
+               { item.item.path | basename: item.content | b64decode }
+             ) }}
+      loop: "{{ rule_contents.results }}"
+
+    - name: Write custom rules values file
+      ansible.builtin.copy:
+        content: "{{ {'customRules': custom_rules_dict} | to_nice_yaml }}"
+        dest: "/home/{{ microk8s_user }}/custom-rules-values.yaml"
+
+    - name: Upgrade Falco with custom rules
+      kubernetes.core.helm:
+        name: falco
+        chart_ref: falcosecurity/falco
+        release_namespace: falco
+        values_files:
+          - "/home/{{ microk8s_user }}/custom-rules-values.yaml"
+        kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+        state: present
 

@@ -27,7 +27,6 @@
         name: k8s-metacollector
         chart_ref: falcosecurity/k8s-metacollector
         release_namespace: falco
-        create_namespace: true
         kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
     - name: Setting webhook ip variable
       ansible.builtin.command: microk8s kubectl get svc falcosecurity-k8saudit-webhook -n falco -o jsonpath='{.spec.clusterIP}'
