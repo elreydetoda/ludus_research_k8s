@@ -1,4 +1,8 @@
 ---
+- name: "Run attack chain execution steps"
+  ansible.builtin.include_tasks: attack_chain_exec.yml
+  when: enable_attack_chain is true
+
 - name: "Falco agent on this node"
   ansible.builtin.include_tasks: falco-agent.yml
   when:

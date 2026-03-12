@@ -15,7 +15,7 @@ ludus:
       - install_k8s 
       - telemetry
     role_vars:
-      pod_hostpath: true
+      enable_attack_chain: true
       telemetry_role: agent
       ui: grafana
       microk8s_addons:

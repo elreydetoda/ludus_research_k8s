@@ -1,0 +1,427 @@
+---
+# =============================================================
+# Falco detection rules for the IngressNightmare (CVE-2025-1974)
+# ransomware attack chain — covers all 8 attack steps.
+#
+# Rule sources:
+#   syscall  — kernel eBPF driver (process/file/network events)
+#   k8saudit — Kubernetes API audit log plugin
+# =============================================================
+
+
+# =============================================================
+# STEP 1 — NodePort Enumeration
+# Attacker runs nmap against the NodePort range (30000-32767)
+# to discover the exposed admission webhook NodePort.
+# =============================================================
+
+- rule: NodePort Range Scan Detected
+  desc: >
+    nmap launched with arguments covering the Kubernetes NodePort range.
+    Consistent with attacker reconnaissance to locate the unauthenticated
+    ingress-nginx admission webhook (Attack Step 1, T1046).
+  condition: >
+    spawned_process and
+    proc.name = "nmap" and
+    proc.cmdline contains "3000"
+  output: >
+    NodePort range scan detected
+    (user=%user.name cmd=%proc.cmdline pid=%proc.pid
+    container=%container.id container_name=%container.name)
+  priority: WARNING
+  tags: [attack_chain, step1, recon, T1046]
+
+
+# =============================================================
+# STEP 2 — CVE-2025-1974 (IngressNightmare) Exploitation
+# =============================================================
+
+- rule: Kubectl Exec Into Ingress-Nginx Pod
+  desc: >
+    kubectl exec targeting a pod in the ingress-nginx namespace.
+    Used in Attack Step 2 to stage the malicious .so payload inside
+    the ingress-nginx controller and in Step 3 to steal the SA token (T1609).
+  condition: >
+    ka.verb = "create" and
+    ka.target.resource = "pods/exec" and
+    ka.target.namespace = "ingress-nginx"
+  output: >
+    kubectl exec into ingress-nginx pod
+    (user=%ka.user.name pod=%ka.target.name ns=%ka.target.namespace
+    uri=%ka.uri)
+  priority: ERROR
+  source: k8s_audit
+  tags: [attack_chain, step2, step3, lateral_movement, T1609]
+
+- rule: Shared Library Written to Tmp in Container
+  desc: >
+    A .so file written to /tmp inside a container. In CVE-2025-1974 the
+    attacker stages a malicious shared library in the ingress-nginx pod
+    via kubectl exec + base64 pipe, then references it with ssl_engine
+    in a crafted server-snippet annotation (Attack Step 2, T1574.006).
+  condition: >
+    open_write and
+    container and
+    fd.name startswith "/tmp/" and
+    fd.name endswith ".so"
+  output: >
+    Shared library written to /tmp inside container
+    (file=%fd.name proc=%proc.cmdline container=%container.name
+    image=%container.image.repository pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [attack_chain, step2, cve_2025_1974, T1574.006]
+
+- rule: Shared Library Loaded from Tmp in Ingress-Nginx Container
+  desc: >
+    A .so file opened for reading from /tmp inside the ingress-nginx
+    namespace. The CVE-2025-1974 ssl_engine directive causes nginx to
+    call dlopen() on the staged malicious library, firing its constructor
+    and achieving RCE (Attack Step 2, T1574.006).
+  condition: >
+    open_read and
+    container and
+    k8s.ns.name = "ingress-nginx" and
+    fd.name startswith "/tmp/" and
+    fd.name endswith ".so"
+  output: >
+    Shared library loaded from /tmp in ingress-nginx container
+    (file=%fd.name proc=%proc.cmdline container=%container.name
+    pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [attack_chain, step2, cve_2025_1974, shared_library_injection, T1574.006]
+
+- rule: Shell Spawned Inside Ingress-Nginx Pod
+  desc: >
+    A shell process spawned inside the ingress-nginx namespace. The
+    malicious shared library constructor calls system() to execute the
+    RCE payload, creating a child shell under the nginx process
+    (Attack Step 2, T1059.004).
+  condition: >
+    spawned_process and
+    shell_procs and
+    k8s.ns.name = "ingress-nginx" and
+    container
+  output: >
+    Shell spawned inside ingress-nginx pod (RCE indicator)
+    (shell=%proc.name cmd=%proc.cmdline parent=%proc.pname
+    pod=%k8s.pod.name ns=%k8s.ns.name image=%container.image.repository)
+  priority: CRITICAL
+  tags: [attack_chain, step2, cve_2025_1974, rce, T1059.004]
+
+- rule: CVE-2025-1974 Exploit Marker File Written in Container
+  desc: >
+    The exploit confirmation marker file /tmp/pwned-cve-2025-1974 written
+    inside a container. Created by the shared library constructor payload,
+    confirming successful RCE via ssl_engine injection (Attack Step 2).
+  condition: >
+    open_write and
+    container and
+    k8s.ns.name = "ingress-nginx" and
+    fd.name = "/tmp/pwned-cve-2025-1974"
+  output: >
+    CVE-2025-1974 exploit marker file written — RCE confirmed
+    (file=%fd.name proc=%proc.cmdline pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [attack_chain, step2, cve_2025_1974, rce_confirmed, T1574.006]
+
+
+# =============================================================
+# STEP 3 — Service Account Token Theft
+# Attacker execs into the compromised pod, reads the SA token,
+# then enumerates permissions with the stolen credential.
+# =============================================================
+
+- rule: Service Account Token Read Inside Ingress-Nginx Container
+  desc: >
+    A process inside the ingress-nginx namespace read the Kubernetes service
+    account token file. In Attack Step 3 the attacker reads the mounted token
+    to obtain an API credential for further cluster access (T1528).
+  condition: >
+    open_read and
+    container and
+    k8s.ns.name = "ingress-nginx" and
+    fd.name = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  output: >
+    Service account token read inside ingress-nginx container
+    (proc=%proc.cmdline container=%container.name
+    pod=%k8s.pod.name ns=%k8s.ns.name user=%user.name)
+  priority: ERROR
+  tags: [attack_chain, step3, credential_theft, T1528]
+
+- rule: Ingress-Nginx SA Permission Enumeration via SelfSubjectRulesReview
+  desc: >
+    The ingress-nginx service account created a SelfSubjectRulesReview
+    (kubectl auth can-i --list). In Attack Step 3 the attacker queries
+    what the stolen token can access before proceeding to secret theft
+    (T1069.003).
+  condition: >
+    ka.verb = "create" and
+    ka.target.resource = "selfsubjectrulesreviews" and
+    ka.user.name = "system:serviceaccount:ingress-nginx:ingress-nginx"
+  output: >
+    Ingress-nginx SA performing permission enumeration via SelfSubjectRulesReview
+    (user=%ka.user.name verb=%ka.verb resource=%ka.target.resource)
+  priority: ERROR
+  source: k8s_audit
+  tags: [attack_chain, step3, discovery, permission_enumeration, T1069.003]
+
+
+# =============================================================
+# STEP 4 — Cross-Namespace Secret Read
+# Attacker uses the stolen ingress-nginx SA token to read
+# prod-app-config secret in the prod namespace, obtaining DB
+# credentials and the prod-cicd service account token.
+# =============================================================
+
+- rule: Ingress-Nginx SA Reading Secrets in Prod Namespace
+  desc: >
+    The ingress-nginx service account read a secret in the prod namespace.
+    This is the smoking-gun cross-namespace credential theft in Attack
+    Step 4, made possible by a misconfigured ClusterRole granting
+    cluster-wide secret read (T1552.007).
+  condition: >
+    ka.verb in (get, list) and
+    ka.target.resource = "secrets" and
+    ka.target.namespace = "prod" and
+    ka.user.name = "system:serviceaccount:ingress-nginx:ingress-nginx"
+  output: >
+    CRITICAL: ingress-nginx SA reading secrets in prod namespace
+    (user=%ka.user.name verb=%ka.verb
+    secret=%ka.target.name ns=%ka.target.namespace)
+  priority: CRITICAL
+  source: k8s_audit
+  tags: [attack_chain, step4, credential_theft, cross_namespace, T1552.007]
+
+
+# =============================================================
+# STEP 5 — Lateral Movement: Database Connection
+# Attacker launches a postgres client pod in the ingress-nginx
+# namespace and connects to the prod PostgreSQL database.
+# =============================================================
+
+- rule: Unexpected Pod Created in Ingress-Nginx Namespace
+  desc: >
+    A pod was created in the ingress-nginx namespace by a user other than
+    expected controllers. In Attack Step 5 the attacker launches a
+    postgres client pod (db-probe) to connect to the prod database
+    using stolen credentials (T1610).
+  condition: >
+    ka.verb = "create" and
+    ka.target.resource = "pods" and
+    ka.target.namespace = "ingress-nginx" and
+    not ka.user.name in (system:serviceaccount:kube-system:replicaset-controller,
+                         system:serviceaccount:kube-system:deployment-controller,
+                         system:serviceaccount:kube-system:statefulset-controller)
+  output: >
+    Unexpected pod created in ingress-nginx namespace
+    (user=%ka.user.name pod=%ka.target.name ns=%ka.target.namespace
+    image=%ka.req.pod.containers.image)
+  priority: ERROR
+  source: k8s_audit
+  tags: [attack_chain, step5, lateral_movement, T1610]
+
+- rule: Outbound PostgreSQL Connection from Ingress-Nginx Namespace
+  desc: >
+    Outbound TCP connection to port 5432 (PostgreSQL) from a container in
+    the ingress-nginx namespace. In Attack Step 5 the attacker connects to
+    the prod DB using stolen credentials, confirming lateral movement
+    (T1021).
+  condition: >
+    evt.type = connect and
+    evt.dir = "<" and
+    container and
+    k8s.ns.name = "ingress-nginx" and
+    fd.port = 5432
+  output: >
+    Outbound PostgreSQL connection from ingress-nginx namespace
+    (proc=%proc.cmdline dest_ip=%fd.rip dest_port=%fd.rport container=%container.name
+    pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [attack_chain, step5, lateral_movement, database_access, T1021]
+
+
+# =============================================================
+# STEP 6 — Malicious MutatingWebhookConfiguration Registration
+# Attacker uses the stolen prod-cicd token to register a webhook
+# that will inject a ransomware sidecar into every new prod pod.
+# =============================================================
+
+- rule: MutatingWebhookConfiguration Created by Non-Admin
+  desc: >
+    A MutatingWebhookConfiguration was created by a non-cluster-admin
+    principal. Registering a mutating webhook grants the ability to
+    intercept and modify any pod creation cluster-wide (T1546).
+  condition: >
+    ka.verb = "create" and
+    ka.target.resource = "mutatingwebhookconfigurations" and
+    not ka.user.name in (system:admin, kubernetes-admin) and
+    not ka.user.groups contains "system:masters"
+  output: >
+    MutatingWebhookConfiguration created by non-admin
+    (user=%ka.user.name groups=%ka.user.groups
+    name=%ka.target.name verb=%ka.verb)
+  priority: CRITICAL
+  source: k8s_audit
+  tags: [attack_chain, step6, persistence, webhook_abuse, T1546]
+
+- rule: Prod-Cicd SA Created MutatingWebhookConfiguration
+  desc: >
+    The prod-cicd service account created a MutatingWebhookConfiguration.
+    In Attack Step 6 the stolen prod-cicd token is used to register the
+    ransomware injection webhook — the definitive indicator of this stage
+    of the attack (T1078, T1546).
+  condition: >
+    ka.verb = "create" and
+    ka.target.resource = "mutatingwebhookconfigurations" and
+    ka.user.name = "system:serviceaccount:prod:prod-cicd"
+  output: >
+    CRITICAL: prod-cicd SA registered MutatingWebhookConfiguration
+    (user=%ka.user.name name=%ka.target.name verb=%ka.verb)
+  priority: CRITICAL
+  source: k8s_audit
+  tags: [attack_chain, step6, persistence, webhook_abuse, T1078, T1546]
+
+
+# =============================================================
+# STEP 7 — Ransomware Sidecar Image Build (Host-Level)
+# Attacker builds the ransomware container image on the node
+# and imports it into MicroK8s containerd.
+# =============================================================
+
+- rule: Container Image Build on Kubernetes Node
+  desc: >
+    podman build executed on a Kubernetes node (not inside a container).
+    In Attack Step 7 the attacker builds the ransomware sidecar image
+    locally to avoid pulling from a public registry (T1610).
+  condition: >
+    spawned_process and
+    not container and
+    proc.name = "podman" and
+    proc.args contains "build"
+  output: >
+    Container image build on Kubernetes node
+    (cmd=%proc.cmdline user=%user.name pid=%proc.pid)
+  priority: WARNING
+  tags: [attack_chain, step7, defense_evasion, T1610]
+
+- rule: Container Image Imported into MicroK8s Containerd
+  desc: >
+    microk8s ctr images import executed on the node. In Attack Step 7
+    the attacker side-loads the ransomware sidecar image directly into
+    MicroK8s containerd so it is available with imagePullPolicy=Never
+    (T1610).
+  condition: >
+    spawned_process and
+    not container and
+    proc.name = "ctr" and
+    proc.args contains "import"
+  output: >
+    Container image imported into MicroK8s containerd
+    (cmd=%proc.cmdline user=%user.name pid=%proc.pid)
+  priority: WARNING
+  tags: [attack_chain, step7, defense_evasion, T1610]
+
+
+# =============================================================
+# STEP 8 — Ransomware Sidecar Injection and Data Encryption
+# Prod deployment is restarted via the stolen prod-cicd token;
+# the malicious webhook injects the ransomware sidecar which
+# encrypts all files on mounted persistent volumes.
+# =============================================================
+
+- rule: Prod Deployment Rollout Triggered by Prod-Cicd SA
+  desc: >
+    The prod-cicd service account patched/updated a deployment in the
+    prod namespace. In Attack Step 8 the stolen token is used to trigger
+    a rollout restart, causing pod recreation and sidecar injection
+    (T1078).
+  condition: >
+    ka.verb in (update, patch) and
+    ka.target.resource in (deployments, deployments/status) and
+    ka.target.namespace = "prod" and
+    ka.user.name = "system:serviceaccount:prod:prod-cicd"
+  output: >
+    prod-cicd SA triggered deployment rollout in prod namespace
+    (user=%ka.user.name verb=%ka.verb
+    deployment=%ka.target.name ns=%ka.target.namespace)
+  priority: CRITICAL
+  source: k8s_audit
+  tags: [attack_chain, step8, impact, ransomware, T1078]
+
+- rule: Ransomware Sidecar Container Injected into Prod Pod
+  desc: >
+    A pod was created in the prod namespace containing a container image
+    with "ransomware" in its name. In Attack Step 8 the registered
+    MutatingWebhookConfiguration injects the ransomware sidecar into
+    every new pod in the prod namespace (T1055).
+  condition: >
+    ka.verb = "create" and
+    ka.target.resource = "pods" and
+    ka.target.namespace = "prod" and
+    ka.req.pod.containers.image contains "ransomware"
+  output: >
+    CRITICAL: ransomware sidecar injected into prod pod
+    (user=%ka.user.name pod=%ka.target.name ns=%ka.target.namespace
+    image=%ka.req.pod.containers.image)
+  priority: CRITICAL
+  source: k8s_audit
+  tags: [attack_chain, step8, impact, ransomware, sidecar_injection, T1055]
+
+- rule: Mass File Encryption on Container Volume Mount
+  desc: >
+    A process writing files under /mnt/ inside a prod namespace container.
+    In Attack Step 8 the injected ransomware sidecar iterates over all
+    mounted volumes at /mnt/<name> and encrypts every file with Fernet
+    (T1486).
+  condition: >
+    open_write and
+    container and
+    k8s.ns.name = "prod" and
+    fd.name startswith "/mnt/" and
+    not fd.name endswith "RANSOM.txt"
+  output: >
+    File written to volume mount in prod container (ransomware encryption)
+    (file=%fd.name proc=%proc.cmdline container=%container.name
+    pod=%k8s.pod.name ns=%k8s.ns.name
+    image=%container.image.repository)
+  priority: CRITICAL
+  tags: [attack_chain, step8, impact, ransomware, data_encrypted, T1486]
+
+- rule: Ransom Note Written to Container Volume
+  desc: >
+    A RANSOM.txt file written inside a container volume. This is the
+    final artifact of the ransomware execution — written by the sidecar
+    after encrypting all files on the persistent volume (T1486).
+  condition: >
+    open_write and
+    container and
+    k8s.ns.name = "prod" and
+    fd.name endswith "/RANSOM.txt"
+  output: >
+    CRITICAL: ransom note written — ransomware execution confirmed
+    (file=%fd.name proc=%proc.cmdline container=%container.name
+    pod=%k8s.pod.name ns=%k8s.ns.name
+    image=%container.image.repository)
+  priority: CRITICAL
+  tags: [attack_chain, step8, impact, ransomware, T1486]
+
+- rule: Unexpected Python Process in Non-Python Prod Container
+  desc: >
+    A Python process running inside a prod namespace container whose
+    image is not a Python image. In Attack Step 8 the injected
+    ransomware sidecar runs python /encrypt.py, which is not expected
+    inside the nginx-based prod-app container (T1059.006).
+  condition: >
+    spawned_process and
+    container and
+    k8s.ns.name = "prod" and
+    proc.name in (python, python3) and
+    not container.image.repository contains "python" and
+    not container.image.repository contains "ransomware"
+  output: >
+    Unexpected Python process in non-Python prod container
+    (proc=%proc.name cmd=%proc.cmdline container=%container.name
+    image=%container.image.repository
+    pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [attack_chain, step8, impact, ransomware, T1059.006]

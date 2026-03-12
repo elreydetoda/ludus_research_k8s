@@ -1,8 +1,19 @@
 ---
+- name: Wait for snapd to be ready
+  ansible.builtin.command:
+    cmd: snap wait system seed.loaded
+  changed_when: false
+  
 - name: Install microk8s
   community.general.snap:
     name: microk8s
     classic: true
+
+- name: Update repositories cache and install podman package
+  ansible.builtin.apt:
+    name: podman
+    update_cache: yes
+  
 - name: Create a microk8s user
   ansible.builtin.user:
     name: "{{ microk8s_user }}"
@@ -55,6 +66,11 @@
         daemon_reload: true
         state: restarted
   
+
+- name: Install kubernetes Python library
+  ansible.builtin.apt:
+    name: python3-kubernetes
+    state: present
 
 - name: Install Helm
   community.general.snap:

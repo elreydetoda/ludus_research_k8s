@@ -9,6 +9,30 @@
   ansible.builtin.include_tasks: unauth_etcd.yml
   when: unauth_etcd is true and not multinode
 
-- name: Configure demo pod with writable hostmount
-  ansible.builtin.include_tasks: pod_hostpath.yml
-  when: pod_hostpath is true
+- name: Configure network policies
+  ansible.builtin.include_tasks: network_policies.yml
+  when: enable_network_policies is true
+
+- name: Launch vulnerable application with RCE
+  ansible.builtin.include_tasks: pod_rce.yml
+  when: demo_pod_rce is true
+
+- name: RCE Via Nodes/Proxy Get
+  ansible.builtin.include_tasks: gh_nodes_proxy.yml
+  when: gh_nodes_proxy is true
+
+- name: Deploy legitimate admission controller
+  ansible.builtin.include_tasks: admission-controller.yml
+  when: enable_admission_controller is true
+
+- name: Compromise admission controller (malicious webhook)
+  ansible.builtin.include_tasks: admission-controller-compromise.yml
+  when: enable_malicious_webhook is true
+
+- name: Bind cluster-admin to anonymous user
+  ansible.builtin.include_tasks: anon_cluster_admin.yml
+  when: anon_cluster_admin is true
+
+- name: Provision attack chain environment (prod env + vulnerable ingress)
+  ansible.builtin.include_tasks: attack_chain.yml
+  when: enable_attack_chain is true

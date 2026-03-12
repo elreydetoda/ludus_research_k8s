@@ -1,0 +1,58 @@
+- name: Add Kyverno Helm repo
+  become: true
+  become_user: "{{ microk8s_user }}"
+  kubernetes.core.helm_repository:
+    name: kyverno
+    repo_url: "https://kyverno.github.io/kyverno/"
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+
+- name: Install Kyverno via Helm
+  become: true
+  become_user: "{{ microk8s_user }}"
+  kubernetes.core.helm:
+    name: kyverno
+    chart_ref: kyverno/kyverno
+    chart_version: "2.7.5"
+    release_namespace: kyverno
+    create_namespace: true
+    update_repo_cache: true
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+
+- name: Wait for Kyverno admission controller to be ready
+  ansible.builtin.shell:
+    cmd: |
+      microk8s kubectl rollout status deployment/kyverno-admission-controller \
+        -n kyverno --timeout=120s 2>/dev/null || \
+      microk8s kubectl rollout status deployment/kyverno \
+        -n kyverno --timeout=120s
+  changed_when: false
+
+- name: Wait for Kyverno webhook to register
+  ansible.builtin.pause:
+    seconds: 10
+
+- name: Enforce required namespace environment label
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: kyverno.io/v1
+      kind: ClusterPolicy
+      metadata:
+        name: require-namespace-environment-label
+      spec:
+        validationFailureAction: Enforce
+        rules:
+          - name: check-for-environment-label
+            match:
+              any:
+                - resources:
+                    kinds:
+                      - Namespace
+            validate:
+              message: "Namespaces must have an 'environment' label."
+              pattern:
+                metadata:
+                  labels:
+                    environment: "?*"

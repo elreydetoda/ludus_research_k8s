@@ -6,3 +6,34 @@ microk8s_apiserver: "/var/snap/microk8s/current/args/kube-apiserver"
 microk8s_user: "localuser"
 telemetry_hostname: "falcosidekick"
 ui: ''
+
+# attack_chain.yml — prod environment defaults
+prod_db_name: postgres
+prod_db_user: produser
+prod_db_password: "Pr0dPassw0rd!"
+prod_db_image: "postgres:15"
+prod_db_port: 5432
+prod_db_storage_size: 1Gi
+prod_cicd_sa: prod-cicd
+prod_cicd_token_secret: prod-cicd-token
+prod_db_secret_name: prod-db-credentials
+prod_app_secret_name: prod-app-config
+
+# attack_chain.yml — vulnerable ingress-nginx defaults
+vuln_ingress_version: "1.11.4"
+vuln_ingress_chart_version: "4.10.6"
+vuln_ingress_namespace: ingress-nginx
+vuln_ingress_webhook_nodeport: 32443
+# attack_chain.yml — attack simulation defaults
+attacker_nodeport_start: 30000
+attacker_nodeport_end: 32767
+attacker_payload_c: /tmp/payload.c
+attacker_payload_so: /tmp/payload.so
+attacker_exploit_script: /tmp/ingressnightmare.py
+attacker_exploit_marker: /tmp/pwned-cve-2025-1974
+ingress_sa_token_path: /var/run/secrets/kubernetes.io/serviceaccount/token
+ransomware_webhook_name: ransomware-injector
+ransomware_webhook_namespace: default
+ransomware_image: "localhost/ludus-ransomware-sidecar:latest"
+ransomware_dockerfile_dest: /tmp/ransomware-sidecar
+ransomware_fernet_key: "ZmDfcTF7_60GrrY167zsiPd2H8890ZmmD4OjB_6zgOM="

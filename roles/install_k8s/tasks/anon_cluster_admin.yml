@@ -1,0 +1,23 @@
+- name: Wait for Kubernetes API to be reachable
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: 16443
+    timeout: 120
+
+- name: Bind cluster-admin to anonymous user
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: anon-cluster-admin
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+        - kind: User
+          name: system:anonymous
+          apiGroup: rbac.authorization.k8s.io

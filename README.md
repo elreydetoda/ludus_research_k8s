@@ -21,16 +21,17 @@ ludus ansible role add -d ./roles/telemetry
 
 ### `install_k8s` Role
 
-| Variable           | Type    | Options / Notes                                                                 |
-| ------------------ | ------- | ------------------------------------------------------------------------------- |
-| `k8s_flavor`       | string  | `microk8s`                                                                      |
-| `microk8s_addons`  | list    | See [MicroK8s Addons](https://canonical.com/microk8s/docs/addons)               |
-| `microk8s_user`    | string  | User to configure kubectl access for                                            |
-| `multinode`        | boolean | Enable multi-node cluster setup                                                 |
-| `control_node`     | boolean | Mark this node as the control plane (required when `multinode: true`)           |
-| `worker_only`      | boolean | Join as worker-only node (set when `multinode: true`)                           |
-| `node`             | boolean | Join as full node (set when `multinode: true`)                                  |
-
+| Variable                 | Type    | Options / Notes                                                                 |
+| ------------------------ | ------- | ------------------------------------------------------------------------------- |
+| `k8s_flavor`             | string  | `microk8s`                                                                      |
+| `microk8s_addons`        | list    | See [MicroK8s Addons](https://canonical.com/microk8s/docs/addons)               |
+| `microk8s_user`          | string  | User to configure kubectl access for                                            |
+| `multinode`              | boolean | Enable multi-node cluster setup                                                 |
+| `control_node`           | boolean | Mark this node as the control plane (required when `multinode: true`)           |
+| `worker_only`            | boolean | Join as worker-only node (set when `multinode: true`)                           |
+| `node`                   | boolean | Join as full node (set when `multinode: true`)                                  |
+|`enable_network_policies` | boolean |                                                                                 |
+|`demo_pod_rce`            | boolean |                                                                                 |
 ### `telemetry` Role
 
 | Variable             | Type    | Options / Notes                                               |

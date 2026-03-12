@@ -1,0 +1,100 @@
+
+- name: Create nodes-proxy-reader ClusterRole
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: nodes-proxy-reader
+      rules:
+        - apiGroups: [""]
+          resources: ["nodes/proxy"]
+          verbs: ["get"]
+
+- name: Create attacker ServiceAccount
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: attacker
+        namespace: default
+
+- name: Bind nodes-proxy-reader to attacker ServiceAccount
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: attacker-nodes-proxy
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: nodes-proxy-reader
+      subjects:
+        - kind: ServiceAccount
+          name: attacker
+          namespace: default
+
+- name: Deploy nginx pod
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: nginx
+        namespace: default
+      spec:
+        containers:
+          - name: nginx
+            image: nginx:latest
+            imagePullPolicy: IfNotPresent
+            ports:
+              - containerPort: 80
+
+- name: Delete attacker pod if it exists
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: absent
+    api_version: v1
+    kind: Pod
+    name: attacker
+    namespace: default
+    wait: true
+
+- name: Deploy attacker pod
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: attacker
+        namespace: default
+      spec:
+        serviceAccountName: attacker
+        containers:
+          - name: attacker
+            image: alpine:latest
+            imagePullPolicy: IfNotPresent
+            command:
+              - /bin/sh
+              - -c
+              - |
+                apk add --no-cache jq curl &&
+                wget -qO /usr/local/bin/websocat https://github.com/vi/websocat/releases/download/v1.14.1/websocat.x86_64-unknown-linux-musl &&
+                chmod +x /usr/local/bin/websocat &&
+                sleep infinity
+            env:
+              - name: APISERVER
+                value: "https://kubernetes.default.svc"
+
