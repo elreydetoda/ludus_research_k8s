@@ -1,0 +1,37 @@
+- rule: Outbound C2 Callback Pattern
+  desc: >
+    Detects outbound TCP connections from a container to a remote host,
+    consistent with a C2 beacon or implant callback pattern.
+  condition: >
+    evt.type = connect
+    and container.id != host
+    and fd.typechar = 4
+    and fd.rip != "127.0.0.1"
+    and fd.rip != "::1"
+    and fd.rport != 0
+  output: >
+    Outbound C2 callback detected (pod=%k8s.pod.name ns=%k8s.pod.namespace
+    image=%container.image.repository cmd=%proc.cmdline
+    dst=%fd.rip:%fd.rport)
+  priority: CRITICAL
+  source: syscall
+  tags: [c2, network, mitre_command_and_control]
+
+- rule: Kubectl or Curl to Kubernetes API Server from Pod
+  desc: >
+    Detects kubectl or curl invocations targeting the Kubernetes API server
+    (port 443 or 6443) from inside a running pod, indicating potential
+    in-cluster API enumeration or privilege escalation.
+  condition: >
+    evt.type = connect
+    and container.id != host
+    and fd.typechar = 4
+    and (fd.rport = 443 or fd.rport = 6443)
+    and (proc.name = kubectl or proc.name = curl or proc.name = wget)
+  output: >
+    API server contacted from inside pod (pod=%k8s.pod.name
+    ns=%k8s.pod.namespace image=%container.image.repository
+    cmd=%proc.cmdline dst=%fd.rip:%fd.rport)
+  priority: WARNING
+  source: syscall
+  tags: [k8s, discovery, mitre_discovery]

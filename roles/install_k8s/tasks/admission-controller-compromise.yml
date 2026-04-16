@@ -1,11 +1,15 @@
+- name: Set kubectl command based on flavor
+  ansible.builtin.set_fact:
+    _kubectl: "{{ 'microk8s kubectl' if k8s_flavor | default('microk8s') == 'microk8s' else 'kubectl' }}"
+
 - name: Generate self-signed TLS cert for malicious webhook
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.shell:
     cmd: |
       openssl req -x509 -newkey rsa:2048 \
-        -keyout /home/{{ microk8s_user }}/webhook-key.pem \
-        -out /home/{{ microk8s_user }}/webhook-cert.pem \
+        -keyout /home/{{ k8s_user }}/webhook-key.pem \
+        -out /home/{{ k8s_user }}/webhook-cert.pem \
         -days 365 -nodes \
         -subj "/CN=malicious-webhook.default.svc" \
         -addext "subjectAltName=DNS:malicious-webhook.default.svc,DNS:malicious-webhook.default.svc.cluster.local"
@@ -13,27 +17,27 @@
 
 - name: Create TLS secret for malicious webhook
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.shell:
     cmd: |
-      microk8s kubectl create secret tls malicious-webhook-tls \
-        --cert=/home/{{ microk8s_user }}/webhook-cert.pem \
-        --key=/home/{{ microk8s_user }}/webhook-key.pem \
+      {{ _kubectl }} create secret tls malicious-webhook-tls \
+        --cert=/home/{{ k8s_user }}/webhook-cert.pem \
+        --key=/home/{{ k8s_user }}/webhook-key.pem \
         --namespace=default \
-        --dry-run=client -o yaml | microk8s kubectl apply -f -
+        --dry-run=client -o yaml | {{ _kubectl }} apply -f -
   changed_when: true
 
 - name: Read CA bundle for webhook config
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.shell:
-    cmd: base64 -w 0 /home/{{ microk8s_user }}/webhook-cert.pem
+    cmd: base64 -w 0 /home/{{ k8s_user }}/webhook-cert.pem
   register: ca_bundle
   changed_when: false
 
 - name: Create ConfigMap with webhook server script
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: v1
@@ -103,7 +107,7 @@
 
 - name: Delete malicious webhook pod if it exists
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: absent
     api_version: v1
     kind: Pod
@@ -113,7 +117,7 @@
 
 - name: Deploy malicious webhook server
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: v1
@@ -153,7 +157,7 @@
 
 - name: Create Service for malicious webhook
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: v1
@@ -170,7 +174,7 @@
 
 - name: Create victim namespace (target for injection)
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: v1
@@ -183,14 +187,14 @@
 
 - name: Wait for malicious webhook pod to be ready
   ansible.builtin.command:
-    cmd: microk8s kubectl wait pod/malicious-webhook -n default --for=condition=Ready --timeout=120s
+    cmd: {{ _kubectl }} wait pod/malicious-webhook -n default --for=condition=Ready --timeout=120s
   changed_when: false
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
 
 - name: Register MutatingWebhookConfiguration
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: admissionregistration.k8s.io/v1

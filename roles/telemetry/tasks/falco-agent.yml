@@ -1,31 +1,48 @@
 ---
+- name: Set kubectl command based on flavor
+  ansible.builtin.set_fact:
+    _kubectl: "{{ 'microk8s kubectl' if k8s_flavor | default('microk8s') == 'microk8s' else 'kubectl' }}"
 
+# ── Cluster readiness ─────────────────────────────────────────────────────────
 - name: Wait for MicroK8s to be ready
   ansible.builtin.command:
     cmd: microk8s status --wait-ready
   changed_when: false
+  when: k8s_flavor | default('microk8s') == 'microk8s'
 
-- name: Wait for Kubernetes API to be reachable
+- name: "[kubeadm] Wait for Kubernetes API to be ready"
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes
+  register: _k8s_ready
+  until: _k8s_ready.rc == 0
+  retries: 24
+  delay: 5
+  changed_when: false
+  when: k8s_flavor | default('microk8s') == 'kubeadm'
+
+- name: Wait for Kubernetes API port to be reachable
   ansible.builtin.wait_for:
     host: "{{ ansible_host }}"
-    port: 16443
+    port: "{{ '16443' if k8s_flavor | default('microk8s') == 'microk8s' else '6443' }}"
     timeout: 120
 
+# ── Falco install via Helm ────────────────────────────────────────────────────
 - name: Add falcosecurity chart repo
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   kubernetes.core.helm_repository:
     name: falcosecurity
     repo_url: "https://falcosecurity.github.io/charts"
 
 - name: Install Falco via Helm
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   kubernetes.core.helm:
     update_repo_cache: true
     name: falco
     chart_ref: falcosecurity/falco
-    release_namespace: falco
+    chart_version: "{{ falco_chart_version | default(omit, true) }}"
+    release_namespace: "{{ falco_namespace }}"
     create_namespace: true
     set_values:
       - value: tty=true
@@ -60,7 +77,7 @@
           type: NodePort
           ports:
             - port: 9765
-              nodePort: 30007
+              nodePort: "{{ falco_nodeport }}"
               protocol: TCP
       falcoctl:
         artifact:
@@ -86,77 +103,95 @@
                 - k8saudit-rules:0
                 - k8saudit:0
                 - json:0
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
- 
 
-- name: Configure k8s audit pipeline for Falco
+
+- name: Wait for k8saudit webhook service to be created
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: "{{ _kubectl }} get svc falco-k8saudit-webhook -n {{ falco_namespace }}"
+  register: webhook_svc_check
+  until: webhook_svc_check.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  environment:
+    KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+
+# ── Audit pipeline ────────────────────────────────────────────────────────────
+- name: Configure k8s audit pipeline for Falco
   block:
-    - name: Install k8saudit collector
+    - name: Install k8s-metacollector
+      become: true
+      become_user: "{{ k8s_user }}"
       kubernetes.core.helm:
         update_repo_cache: true
         name: k8s-metacollector
         chart_ref: falcosecurity/k8s-metacollector
-        release_namespace: falco
+        release_namespace: "{{ falco_namespace }}"
         create_namespace: true
-        kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        values:
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
         state: present
 
     - name: Get k8saudit webhook cluster IP
+      become: true
+      become_user: "{{ k8s_user }}"
       ansible.builtin.command:
-        cmd: >
-          microk8s kubectl get svc falco-k8saudit-webhook
-          -n falco
-          -o jsonpath='{.spec.clusterIP}'
+        cmd: "{{ _kubectl }} get svc falco-k8saudit-webhook -n {{ falco_namespace }} -o jsonpath='{.spec.clusterIP}'"
       register: webhookIP
       changed_when: false
+      environment:
+        KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
 
     - name: Get k8saudit webhook port
+      become: true
+      become_user: "{{ k8s_user }}"
       ansible.builtin.command:
-        cmd: >
-          microk8s kubectl get svc falco-k8saudit-webhook
-          -n falco
-          -o jsonpath='{.spec.ports[0].port}'
+        cmd: "{{ _kubectl }} get svc falco-k8saudit-webhook -n {{ falco_namespace }} -o jsonpath='{.spec.ports[0].port}'"
       register: webhookPort
       changed_when: false
+      environment:
+        KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
 
-    - name: Get webhook config
+    # ── MicroK8s: snap args files ─────────────────────────────────────────
+    - name: "[microk8s] Download webhook config"
       ansible.builtin.get_url:
         url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/lab-setup/webhook-config.yaml"
         dest: "{{ microk8s_base }}current/args/webhook-config.yaml"
+      when: k8s_flavor | default('microk8s') == 'microk8s'
 
-    - name: Get audit policy
+    - name: "[microk8s] Download audit policy"
       ansible.builtin.get_url:
         url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/lab-setup/audit-policy.yaml"
         dest: "{{ microk8s_base }}current/args/audit-policy.yaml"
+      when: k8s_flavor | default('microk8s') == 'microk8s'
 
-    - name: Update webhook URL in webhook config
+    - name: "[microk8s] Update webhook URL in webhook config"
       ansible.builtin.lineinfile:
         path: "{{ microk8s_base }}/current/args/webhook-config.yaml"
         regexp: 'server: http://.*:.*\/k8s-audit'
         line: "    server: http://{{ webhookIP.stdout }}:{{ webhookPort.stdout }}/k8s-audit"
+      when: k8s_flavor | default('microk8s') == 'microk8s'
 
-    - name: Add audit log path to API server
+    - name: "[microk8s] Add audit flags to API server args"
       ansible.builtin.lineinfile:
         path: "{{ microk8s_apiserver }}"
-        line: "--audit-log-path={{ microk8s_base }}common/var/log/kube-apiserver-audit.log"
+        line: "{{ item }}"
         create: true
+      loop:
+        - "--audit-log-path={{ microk8s_base }}common/var/log/kube-apiserver-audit.log"
+        - "--audit-webhook-config-file={{ microk8s_base }}current/args/webhook-config.yaml"
+        - "--audit-policy-file={{ microk8s_base }}/current/args/audit-policy.yaml"
+      when: k8s_flavor | default('microk8s') == 'microk8s'
 
-    - name: Add audit webhook file path to API server
-      ansible.builtin.lineinfile:
-        path: "{{ microk8s_apiserver }}"
-        line: "--audit-webhook-config-file={{ microk8s_base }}current/args/webhook-config.yaml"
-        create: true
-
-    - name: Add audit policy file path to API server
-      ansible.builtin.lineinfile:
-        path: "{{ microk8s_apiserver }}"
-        line: "--audit-policy-file={{ microk8s_base }}/current/args/audit-policy.yaml"
-        create: true
-
-    - name: Restart MicroK8s API server
+    - name: "[microk8s] Restart MicroK8s API server"
       become: true
       become_user: root
       become_method: sudo
@@ -164,63 +199,161 @@
         name: snap.microk8s.daemon-kubelite.service
         daemon_reload: true
         state: restarted
+      when: k8s_flavor | default('microk8s') == 'microk8s'
 
+    # ── kubeadm: static pod manifest ──────────────────────────────────────
+    - name: "[kubeadm] Create audit config directory"
+      ansible.builtin.file:
+        path: /etc/kubernetes/audit
+        state: directory
+        mode: "0755"
+      when: k8s_flavor | default('microk8s') == 'kubeadm'
+
+    - name: "[kubeadm] Download webhook config"
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/lab-setup/webhook-config.yaml"
+        dest: /etc/kubernetes/audit/webhook-config.yaml
+        mode: "0644"
+      when: k8s_flavor | default('microk8s') == 'kubeadm'
+
+    - name: "[kubeadm] Download audit policy"
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/lab-setup/audit-policy.yaml"
+        dest: /etc/kubernetes/audit/audit-policy.yaml
+        mode: "0644"
+      when: k8s_flavor | default('microk8s') == 'kubeadm'
+
+    - name: "[kubeadm] Update webhook URL in webhook config"
+      ansible.builtin.lineinfile:
+        path: /etc/kubernetes/audit/webhook-config.yaml
+        regexp: 'server: http://.*:.*\/k8s-audit'
+        line: "    server: http://{{ webhookIP.stdout }}:{{ webhookPort.stdout }}/k8s-audit"
+      when: k8s_flavor | default('microk8s') == 'kubeadm'
+
+    - name: "[kubeadm] Patch kube-apiserver static pod manifest for audit logging"
+      ansible.builtin.shell: |
+        python3 << 'PYEOF'
+        import yaml
+
+        manifest_path = '/etc/kubernetes/manifests/kube-apiserver.yaml'
+        with open(manifest_path) as f:
+            manifest = yaml.safe_load(f)
+
+        container = manifest['spec']['containers'][0]
+
+        # Audit command-line args
+        audit_args = [
+            '--audit-log-path=/var/log/kubernetes/kube-apiserver-audit.log',
+            '--audit-webhook-config-file=/etc/kubernetes/audit/webhook-config.yaml',
+            '--audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml',
+        ]
+        cmd = container.get('command', [])
+        for arg in audit_args:
+            key = arg.split('=')[0]
+            if not any(a.startswith(key) for a in cmd):
+                cmd.append(arg)
+        container['command'] = cmd
+
+        # Volume mounts
+        vol_mounts = container.setdefault('volumeMounts', [])
+        new_mounts = [
+            {'mountPath': '/var/log/kubernetes', 'name': 'audit-log'},
+            {'mountPath': '/etc/kubernetes/audit', 'name': 'audit-cfg', 'readOnly': True},
+        ]
+        existing_names = {m['name'] for m in vol_mounts}
+        for m in new_mounts:
+            if m['name'] not in existing_names:
+                vol_mounts.append(m)
+
+        # Volumes
+        volumes = manifest['spec'].setdefault('volumes', [])
+        new_vols = [
+            {'hostPath': {'path': '/var/log/kubernetes', 'type': 'DirectoryOrCreate'}, 'name': 'audit-log'},
+            {'hostPath': {'path': '/etc/kubernetes/audit', 'type': 'DirectoryOrCreate'}, 'name': 'audit-cfg'},
+        ]
+        existing_vol_names = {v['name'] for v in volumes}
+        for v in new_vols:
+            if v['name'] not in existing_vol_names:
+                volumes.append(v)
+
+        with open(manifest_path, 'w') as f:
+            yaml.dump(manifest, f, default_flow_style=False)
+        PYEOF
+      when: k8s_flavor | default('microk8s') == 'kubeadm'
+      changed_when: true
+
+    - name: "[kubeadm] Wait for API server to recover after manifest patch"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 6443
+        timeout: 120
+        delay: 10
+      when: k8s_flavor | default('microk8s') == 'kubeadm'
+
+    - name: "[kubeadm] Wait for node to be Ready after API server restart"
+      ansible.builtin.command:
+        cmd: kubectl wait --for=condition=Ready node --all --timeout=30s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: _node_ready
+      until: _node_ready.rc == 0
+      retries: 8
+      delay: 10
+      when: k8s_flavor | default('microk8s') == 'kubeadm'
+      changed_when: false
+
+# ── Custom Falco rules ────────────────────────────────────────────────────────
 - name: Create rules.d directory
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.file:
-    path: "/home/{{ microk8s_user }}/rules.d"
+    path: "/home/{{ k8s_user }}/rules.d"
     state: directory
     mode: '0755'
 
-- name: Copy attack chain Falco rules
+- name: Apply selected Falco rules
   become: true
-  become_user: "{{ microk8s_user }}"
-  ansible.builtin.copy:
-    src: deps/attack-chain-rules.yaml
-    dest: "/home/{{ microk8s_user }}/rules.d/attack-chain-rules.yaml"
-    mode: '0644'
-
-- name: Find rule files in rules.d
-  become: true
-  become_user: "{{ microk8s_user }}"
-  ansible.builtin.find:
-    paths: "/home/{{ microk8s_user }}/rules.d"
-    patterns: "*.yaml,*.yml"
-  register: rule_files
-
-- name: Apply custom Falco rules from rules.d
-  become: true
-  become_user: "{{ microk8s_user }}"
-  when: rule_files.files | length > 0
+  become_user: "{{ k8s_user }}"
+  when: falco_custom_rules | default([]) | length > 0
   block:
-    - name: Read rule file contents
-      ansible.builtin.slurp:
-        src: "{{ item.path }}"
-      loop: "{{ rule_files.files }}"
-      register: rule_contents
+    - name: Copy master rules file to remote
+      ansible.builtin.copy:
+        src: deps/rules.yaml
+        dest: "/home/{{ k8s_user }}/rules.yaml"
+        mode: '0644'
 
-    - name: Build custom rules dict
+    - name: Read master rules file
+      ansible.builtin.slurp:
+        src: "/home/{{ k8s_user }}/rules.yaml"
+      register: _rules_raw
+
+    - name: Filter rules by selected names
       ansible.builtin.set_fact:
-        custom_rules_dict: >-
-          {{ custom_rules_dict | default({}) | combine(
-               { item.item.path | basename: item.content | b64decode }
-             ) }}
-      loop: "{{ rule_contents.results }}"
+        _filtered_rules: >-
+          {%- set result = [] -%}
+          {%- set source = _rules_raw.content | b64decode | from_yaml -%}
+          {%- for section_yaml in source.values() -%}
+            {%- for item in (section_yaml | from_yaml) -%}
+              {%- if 'rule' not in item or item.rule in falco_custom_rules -%}
+                {%- set _ = result.append(item) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ result }}
 
     - name: Write custom rules values file
       ansible.builtin.copy:
-        content: "{{ {'customRules': custom_rules_dict} | to_nice_yaml }}"
-        dest: "/home/{{ microk8s_user }}/custom-rules-values.yaml"
+        content: "{{ {'customRules': {'custom-rules.yaml': _filtered_rules | to_nice_yaml}} | to_nice_yaml }}"
+        dest: "/home/{{ k8s_user }}/custom-rules-values.yaml"
+        mode: '0644'
 
     - name: Upgrade Falco with custom rules
-      kubernetes.core.helm:
-        name: falco
-        chart_ref: falcosecurity/falco
-        release_namespace: falco
-        values_files:
-          - "/home/{{ microk8s_user }}/custom-rules-values.yaml"
-        reuse_values: true
-        kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
-        state: present
-
+      ansible.builtin.command:
+        cmd: >
+          helm upgrade falco falcosecurity/falco
+          -n {{ falco_namespace }}
+          --reuse-values
+          -f "/home/{{ k8s_user }}/custom-rules-values.yaml"
+      environment:
+        KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+      changed_when: true

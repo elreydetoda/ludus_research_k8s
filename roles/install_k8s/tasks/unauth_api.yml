@@ -1,26 +1,93 @@
 - name: Configure unauth API
   block:
-    - name: Modify API Server Config
+    # ── MicroK8s: edit snap args files and restart kubelite ──────────────────
+    - name: "[microk8s] Enable anonymous-auth on API server"
       ansible.builtin.lineinfile:
         path: /var/snap/microk8s/current/args/kube-apiserver
         regexp: '^--anonymous-auth='
         line: '--anonymous-auth=true'
-    - name: Modify Kubelet API Config
+      when:
+        - k8s_flavor | default('microk8s') == 'microk8s'
+        - enable_unauth_api | default(false) | bool
+
+    - name: "[microk8s] Enable anonymous-auth on Kubelet"
       ansible.builtin.lineinfile:
         path: /var/snap/microk8s/current/args/kubelet
         regexp: '^--anonymous-auth='
         line: '--anonymous-auth=true'
-    - name: Restart APIs 
+      when:
+        - k8s_flavor | default('microk8s') == 'microk8s'
+        - enable_unauth_kubelet | default(false) | bool
+
+    - name: "[microk8s] Set kubelet authorization mode to AlwaysAllow"
+      ansible.builtin.lineinfile:
+        path: /var/snap/microk8s/current/args/kubelet
+        regexp: '^--authorization-mode='
+        line: '--authorization-mode=AlwaysAllow'
+      when:
+        - k8s_flavor | default('microk8s') == 'microk8s'
+        - enable_unauth_kubelet | default(false) | bool
+
+    - name: "[microk8s] Restart kubelite"
       ansible.builtin.systemd_service:
         name: snap.microk8s.daemon-kubelite.service
         state: restarted
+      when:
+        - k8s_flavor | default('microk8s') == 'microk8s'
+        - enable_unauth_api | default(false) | bool or enable_unauth_kubelet | default(false) | bool
+
+    # ── kubeadm: patch static pod manifest and restart kubelet ───────────────
+    - name: "[kubeadm] Enable anonymous-auth in kube-apiserver static pod manifest"
+      ansible.builtin.lineinfile:
+        path: /etc/kubernetes/manifests/kube-apiserver.yaml
+        regexp: '^\s*-\s*--anonymous-auth='
+        line: '    - --anonymous-auth=true'
+        insertafter: '^\s*-\s*--advertise-address='
+      when:
+        - k8s_flavor | default('microk8s') == 'kubeadm'
+        - enable_unauth_api | default(false) | bool
+
+    - name: "[kubeadm] Wait for API server to recover after manifest change"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 6443
+        timeout: 120
+        delay: 5
+      when:
+        - k8s_flavor | default('microk8s') == 'kubeadm'
+        - enable_unauth_api | default(false) | bool
+
+    - name: "[kubeadm] Enable anonymous-auth in kubelet config"
+      ansible.builtin.replace:
+        path: /var/lib/kubelet/config.yaml
+        regexp: '(authentication:\n\s+anonymous:\n\s+enabled:\s*)false'
+        replace: '\1true'
+      when:
+        - k8s_flavor | default('microk8s') == 'kubeadm'
+        - enable_unauth_kubelet | default(false) | bool
+
+    - name: "[kubeadm] Set kubelet authorization mode to AlwaysAllow"
+      ansible.builtin.replace:
+        path: /var/lib/kubelet/config.yaml
+        regexp: '(authorization:\n\s+mode:\s*)\w+'
+        replace: '\1AlwaysAllow'
+      when:
+        - k8s_flavor | default('microk8s') == 'kubeadm'
+        - enable_unauth_kubelet | default(false) | bool
+
+    - name: "[kubeadm] Restart kubelet"
+      ansible.builtin.systemd_service:
+        name: kubelet
+        state: restarted
+      when:
+        - k8s_flavor | default('microk8s') == 'kubeadm'
+        - enable_unauth_kubelet | default(false) | bool
+
+    # ── Both flavors ──────────────────────────────────────────────────────────
     - name: Install Kubeletctl
       ansible.builtin.get_url:
         url: "https://github.com/cyberark/kubeletctl/releases/download/{{ kubeletctl_version }}/kubeletctl_linux_amd64"
         dest: "{{ kubeletctl_install_path }}"
         mode: '0755'
+      when: enable_unauth_kubelet | default(false) | bool
 
-- name: Get Anon Rules
-  ansible.builtin.get_url:
-    url: "https://raw.githubusercontent.com/heilancoos/k8s-custom-detections/refs/heads/main/falco/rules/anonymous-auth-apis.yaml"
-    dest: "/home/{{ microk8s_user }}/rules.d/"

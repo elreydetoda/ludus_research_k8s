@@ -1,14 +1,18 @@
+- name: Set kubectl command based on flavor
+  ansible.builtin.set_fact:
+    _kubectl: "{{ 'microk8s kubectl' if k8s_flavor | default('microk8s') == 'microk8s' else 'kubectl' }}"
+
 - name: Add Kyverno Helm repo
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   kubernetes.core.helm_repository:
     name: kyverno
     repo_url: "https://kyverno.github.io/kyverno/"
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
 
 - name: Install Kyverno via Helm
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   kubernetes.core.helm:
     name: kyverno
     chart_ref: kyverno/kyverno
@@ -16,15 +20,15 @@
     release_namespace: kyverno
     create_namespace: true
     update_repo_cache: true
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
 
 - name: Wait for Kyverno admission controller to be ready
   ansible.builtin.shell:
     cmd: |
-      microk8s kubectl rollout status deployment/kyverno-admission-controller \
+      {{ _kubectl }} rollout status deployment/kyverno-admission-controller \
         -n kyverno --timeout=120s 2>/dev/null || \
-      microk8s kubectl rollout status deployment/kyverno \
+      {{ _kubectl }} rollout status deployment/kyverno \
         -n kyverno --timeout=120s
   changed_when: false
 
@@ -32,27 +36,220 @@
   ansible.builtin.pause:
     seconds: 10
 
-- name: Enforce required namespace environment label
+# ── Remove policies not matching the active preset ───────────────────────────
+
+- name: Remove inactive Kyverno policies
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: absent
+    definition:
+      apiVersion: kyverno.io/v1
+      kind: ClusterPolicy
+      metadata:
+        name: "{{ item.name }}"
+  loop:
+    - { preset: block_privileged,        name: block-privileged }
+    - { preset: require_labels,          name: require-labels }
+    - { preset: inject_security_context, name: inject-security-context }
+    - { preset: add_default_labels,      name: add-default-labels }
+  when: item.preset != kyverno_policy_preset
+
+# ── Validating policies ──────────────────────────────────────────────────────
+
+- name: "Validating | block_privileged — block privileged containers and hostPath mounts"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: kyverno.io/v1
       kind: ClusterPolicy
       metadata:
-        name: require-namespace-environment-label
+        name: block-privileged
       spec:
         validationFailureAction: Enforce
         rules:
-          - name: check-for-environment-label
+          - name: block-privileged-containers
+            match:
+              any:
+                - resources:
+                    kinds:
+                      - Pod
+            exclude:
+              any:
+                - resources:
+                    namespaces: "{{ kyverno_excluded_namespaces }}"
+            validate:
+              message: "Privileged containers are not allowed."
+              pattern:
+                spec:
+                  containers:
+                    - =(securityContext):
+                        =(privileged): "false"
+                  initContainers:
+                    - =(securityContext):
+                        =(privileged): "false"
+          - name: block-hostpath-volumes
+            match:
+              any:
+                - resources:
+                    kinds:
+                      - Pod
+            exclude:
+              any:
+                - resources:
+                    namespaces: "{{ kyverno_excluded_namespaces }}"
+            validate:
+              message: "hostPath volumes are not allowed."
+              deny:
+                conditions:
+                  any:
+                    - key: !unsafe "{{ request.object.spec.volumes[].hostPath | length(@) }}"
+                      operator: GreaterThan
+                      value: "0"
+  when:
+    - kyverno_policy_type == "validating"
+    - kyverno_policy_preset == "block_privileged"
+
+- name: "Validating | require_labels — require environment and app labels on namespaces and pods"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: kyverno.io/v1
+      kind: ClusterPolicy
+      metadata:
+        name: require-labels
+      spec:
+        validationFailureAction: Enforce
+        rules:
+          - name: require-namespace-labels
             match:
               any:
                 - resources:
                     kinds:
                       - Namespace
+            exclude:
+              any:
+                - resources:
+                    namespaces: "{{ kyverno_excluded_namespaces }}"
             validate:
-              message: "Namespaces must have an 'environment' label."
+              message: "Namespaces must have 'environment' and 'app' labels."
               pattern:
                 metadata:
                   labels:
                     environment: "?*"
+                    app: "?*"
+          - name: require-pod-labels
+            match:
+              any:
+                - resources:
+                    kinds:
+                      - Pod
+            exclude:
+              any:
+                - resources:
+                    namespaces: "{{ kyverno_excluded_namespaces }}"
+            validate:
+              message: "Pods must have 'environment' and 'app' labels."
+              pattern:
+                metadata:
+                  labels:
+                    environment: "?*"
+                    app: "?*"
+  when:
+    - kyverno_policy_type == "validating"
+    - kyverno_policy_preset == "require_labels"
+
+# ── Mutating policies ────────────────────────────────────────────────────────
+
+- name: "Mutating | inject_security_context — auto-inject hardened securityContext into pods"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: kyverno.io/v1
+      kind: ClusterPolicy
+      metadata:
+        name: inject-security-context
+      spec:
+        rules:
+          - name: add-security-context
+            match:
+              any:
+                - resources:
+                    kinds:
+                      - Pod
+            exclude:
+              any:
+                - resources:
+                    namespaces: "{{ kyverno_excluded_namespaces }}"
+            mutate:
+              patchStrategicMerge:
+                spec:
+                  securityContext:
+                    runAsNonRoot: true
+                    seccompProfile:
+                      type: RuntimeDefault
+                  containers:
+                    - (name): "?*"
+                      securityContext:
+                        readOnlyRootFilesystem: true
+                        allowPrivilegeEscalation: false
+                        capabilities:
+                          drop:
+                            - ALL
+  when:
+    - kyverno_policy_type == "mutating"
+    - kyverno_policy_preset == "inject_security_context"
+
+- name: "Mutating | add_default_labels — auto-add environment label to namespaces missing it"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: kyverno.io/v1
+      kind: ClusterPolicy
+      metadata:
+        name: add-default-labels
+      spec:
+        rules:
+          - name: add-environment-label-namespace
+            match:
+              any:
+                - resources:
+                    kinds:
+                      - Namespace
+            mutate:
+              patchStrategicMerge:
+                metadata:
+                  labels:
+                    +(environment): "lab"
+          - name: add-environment-label-pod
+            match:
+              any:
+                - resources:
+                    kinds:
+                      - Pod
+            exclude:
+              any:
+                - resources:
+                    namespaces: "{{ kyverno_excluded_namespaces }}"
+            mutate:
+              patchStrategicMerge:
+                metadata:
+                  labels:
+                    +(environment): "lab"
+                    +(app): "unknown"
+  when:
+    - kyverno_policy_type == "mutating"
+    - kyverno_policy_preset == "add_default_labels"
+
+# ── Custom policies ──────────────────────────────────────────────────────────
+
+- name: Apply custom Kyverno ClusterPolicies
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition: "{{ item }}"
+  loop: "{{ kyverno_custom_policies }}"
+  when: kyverno_custom_policies | length > 0

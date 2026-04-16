@@ -5,10 +5,59 @@ kubeletctl_version: "v1.13"
 kubeletctl_install_path: "/usr/local/bin/kubeletctl"
 microk8s_base: "/var/snap/microk8s/"
 microk8s_apiserver: "/var/snap/microk8s/current/args/kube-apiserver"
+etcd_manifest: "/etc/kubernetes/manifests/etcd.yaml"
 worker_only: false
+control_node: false
+multinode: false
+k8s_control_plane: ""
+enable_unauth_api: false
+enable_unauth_kubelet: false
 node: false
 multinode: false
 microk8s_user: localuser
+microk8s_join_token: "0123456789abcdef0123456789abcdef"
+microk8s_addons:
+  - dns
+  - storage
+  - helm3
+k8s_node_name: "{{ ansible_hostname | lower }}"
+
+# k8s flavor — microk8s (default) or kubeadm
+k8s_flavor: "microk8s"
+
+# Name of the Kubernetes cluster (used in kubeadm ClusterConfiguration and kubeconfig context)
+cluster_name: "kubernetes"
+
+# MicroK8s snap channel, e.g. "1.31/stable". Empty string installs the latest stable.
+microk8s_version: ""
+
+# k8s_user is the unprivileged user that owns the kubeconfig.
+# Defaults to microk8s_user so existing configs don't need changes.
+k8s_user: "{{ microk8s_user }}"
+
+# kubeadm.yml — kubeadm-specific settings
+# Minor version stream for the Kubernetes apt repo (e.g. "1.31").
+# All three packages (kubeadm, kubelet, kubectl) are installed from this
+# channel and held at the version resolved at provision time.
+kubeadm_version: "1.31"
+
+# CNI plugin to deploy after kubeadm init: calico | cilium
+# Calico matches the MicroK8s default and uses 192.168.0.0/16.
+# Cilium uses 10.0.0.0/8.
+k8s_cni: "calico"
+
+# custom_rbac.yml — user-defined Roles, ClusterRoles, RoleBindings, ClusterRoleBindings
+enable_custom_rbac: false
+rbac_namespaces: []
+rbac_service_accounts: []
+rbac_roles: []
+rbac_bindings: []
+
+# headlamp.yml — Kubernetes dashboard
+enable_headlamp: false
+headlamp_namespace: "kube-system"
+headlamp_nodeport: 30095
+headlamp_plugins_manager_enabled: false
 
 # attack_chain.yml — prod environment defaults
 prod_db_name: postgres
@@ -26,6 +75,7 @@ prod_app_secret_name: prod-app-config
 vuln_ingress_version: "1.11.4"
 vuln_ingress_chart_version: "4.10.6"
 vuln_ingress_namespace: ingress-nginx
+vuln_ingress_http_nodeport: 30800
 vuln_ingress_webhook_nodeport: 32443
 
 # attack_chain.yml — attack simulation defaults
@@ -41,3 +91,54 @@ ransomware_webhook_namespace: default
 ransomware_image: "localhost/ludus-ransomware-sidecar:latest"
 ransomware_dockerfile_dest: /tmp/ransomware-sidecar
 ransomware_fernet_key: "ZmDfcTF7_60GrrY167zsiPd2H8890ZmmD4OjB_6zgOM="
+
+# mythic.yml — Mythic C2 server variables
+mythic_server: false
+mythic_server_ip: ""
+mythic_admin_user: "mythic_admin"
+mythic_admin_password: "{{ lookup('password', '/tmp/.mythic_admin_password chars=ascii_letters,digits length=20') }}"
+mythic_http_profile_port: 80
+mythic_version: "master"
+mythic_payload_dir: "/opt/Mythic/payloads"
+mythic_server_hostname: "{{ range_id }}-mythic-01"
+
+# pod_security_admission.yml — Pod Security Admission (PSA) namespace labeling
+# profiles per entry: privileged | baseline | restricted
+# Each entry creates the namespace if absent, then applies the PSA labels.
+enable_pod_security_admission: false
+psa_namespaces:
+  - name: "default"
+    enforce: "baseline"
+    audit: "restricted"
+    warn: "restricted"
+
+# admission-controller.yml — Kyverno policy configuration
+# enable_admission_controller: true to deploy Kyverno and apply a policy
+# kyverno_policy_type: validating or mutating
+# Validating presets: block_privileged, require_labels
+# Mutating presets:   inject_security_context, add_default_labels
+enable_admission_controller: false
+kyverno_custom_policies: []
+kyverno_excluded_namespaces:
+  - kube-system
+  - kyverno
+  - falco
+  - grafana
+kyverno_policy_type: "validating"
+kyverno_policy_preset: "block_privileged"
+
+# c2_pod.yml — C2 agent pod variables
+enable_c2_pod: false
+c2_pod_namespace: "monitoring"
+c2_pod_name: "app-monitor"
+c2_pod_image: "localhost/c2-agent:latest"
+c2_callback_host: "{{ mythic_server_ip }}"
+c2_callback_port: "{{ mythic_http_profile_port }}"
+c2_callback_interval: 60
+c2_callback_jitter: 20
+c2_pod_service_account: "monitor-sa"
+c2_pod_sa_permissions: "minimal"
+
+# custom_pods.yml — user-defined pod/workload manifests
+# Each item is either an inline manifest (dict) or a path to a YAML file (string).
+custom_pods: []

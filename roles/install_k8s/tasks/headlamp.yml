@@ -1,0 +1,97 @@
+- name: Set kubectl command based on flavor
+  ansible.builtin.set_fact:
+    _kubectl: "{{ 'microk8s kubectl' if k8s_flavor | default('microk8s') == 'microk8s' else 'kubectl' }}"
+
+- name: "Headlamp | add Helm repo"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.helm_repository:
+    name: headlamp
+    repo_url: "https://kubernetes-sigs.github.io/headlamp/"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+
+- name: "Headlamp | install via Helm"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.helm:
+    name: my-headlamp
+    chart_ref: headlamp/headlamp
+    release_namespace: "{{ headlamp_namespace }}"
+    create_namespace: true
+    update_repo_cache: true
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    values:
+      service:
+        type: NodePort
+        nodePort: "{{ headlamp_nodeport }}"
+      config:
+        watchPlugins: true
+      pluginsManager:
+        enabled: "{{ headlamp_plugins_manager_enabled | default(false) }}"
+    state: present
+
+- name: "Headlamp | create admin service account"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: headlamp-admin
+        namespace: "{{ headlamp_namespace }}"
+
+- name: "Headlamp | bind admin service account to cluster-admin"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: headlamp-admin
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+        - kind: ServiceAccount
+          name: headlamp-admin
+          namespace: "{{ headlamp_namespace }}"
+
+- name: "Headlamp | create long-lived admin token secret"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: headlamp-admin-token
+        namespace: "{{ headlamp_namespace }}"
+        annotations:
+          kubernetes.io/service-account.name: headlamp-admin
+      type: kubernetes.io/service-account-token
+
+- name: "Headlamp | retrieve admin token"
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.shell:
+    cmd: >
+      {{ _kubectl }} get secret headlamp-admin-token
+      -n {{ headlamp_namespace }}
+      -o jsonpath='{.data.token}' | base64 -d
+  register: headlamp_token
+  changed_when: false
+
+- name: "Headlamp | print access details"
+  ansible.builtin.debug:
+    msg:
+      - "Headlamp URL : http://{{ ansible_host }}:{{ headlamp_nodeport }}"
+      - "Admin token  : {{ headlamp_token.stdout }}"

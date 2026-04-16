@@ -1,31 +1,254 @@
 # yaml-language-server: $schema=https://docs.ludus.cloud/schemas/range-config.json
 ludus:
-  - vm_name: "{{ range_id }}-k8s-01"
-    hostname: "{{ range_id }}-k8s-01"
+  - vm_name: "{{ range_id }}-k8s-kubeadm-01"
+    hostname: "{{ range_id }}-k8s-kubeadm-01"
     template: ubuntu-24.04-x64-server-template
     vlan: 20
     ip_last_octet: 10
     ram_gb: 4
-    cpus: 8
+    cpus: 4
     linux: true
     testing:
       snapshot: false
       block_internet: false
     roles:
-      - install_k8s 
+      - install_k8s
       - telemetry
     role_vars:
-      enable_attack_chain: true
+      k8s_flavor: kubeadm
+      kubeadm_version: "1.31"
+      k8s_cni: calico
+      anon_cluster_admin: true
+      enable_pod_security_admission: true
+      psa_namespaces:
+        - name: default
+          enforce: baseline
+          audit: restricted
+          warn: restricted
+        - name: restricted-ns
+          enforce: restricted
+          audit: restricted
+          warn: restricted
       telemetry_role: agent
       ui: grafana
+
+  - vm_name: "{{ range_id }}-k8s-kubeadm-rbac"
+    hostname: "{{ range_id }}-k8s-kubeadm-rbac"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20
+    ip_last_octet: 12
+    ram_gb: 4
+    cpus: 4
+    linux: true
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - install_k8s
+      - telemetry
+    role_vars:
+      k8s_flavor: kubeadm
+      kubeadm_version: "1.31"
+      k8s_cni: calico
+      enable_headlamp: true
+      demo_pod_rce: true
+      gh_nodes_proxy: true
+      enable_custom_rbac: true
+      enable_admission_controller: true
+      kyverno_policy_type: validating
+      kyverno_policy_preset: block_privileged
+      telemetry_role: agent
+      falco_custom_rules:
+        - "Anonymous Request Allowed"
+        - "Anonymous Request Failed"
+      custom_pods:
+        - apiVersion: v1
+          kind: Pod
+          metadata:
+            name: nginx-test
+            namespace: default
+          spec:
+            containers:
+              - name: nginx
+                image: nginx
+      rbac_namespaces:
+        - dev
+        - prod
+      rbac_service_accounts:
+        - name: dev-reader
+          namespace: dev
+        - name: prod-deployer
+          namespace: prod
+      rbac_roles:
+        - kind: Role
+          name: pod-reader
+          namespace: dev
+          rules:
+            - apiGroups: [""]
+              resources: ["pods", "pods/log"]
+              verbs: ["get", "list", "watch"]
+        - kind: ClusterRole
+          name: secret-reader
+          rules:
+            - apiGroups: [""]
+              resources: ["secrets"]
+              verbs: ["get", "list"]
+        - kind: Role
+          name: deployer
+          namespace: prod
+          rules:
+            - apiGroups: ["apps"]
+              resources: ["deployments", "replicasets"]
+              verbs: ["get", "list", "watch", "create", "update", "patch"]
+            - apiGroups: [""]
+              resources: ["pods", "services", "configmaps"]
+              verbs: ["get", "list", "watch", "create", "update", "patch"]
+      rbac_bindings:
+        - kind: RoleBinding
+          name: dev-reader-binding
+          namespace: dev
+          role_ref:
+            kind: Role
+            name: pod-reader
+          subjects:
+            - kind: ServiceAccount
+              name: dev-reader
+              namespace: dev
+        - kind: RoleBinding
+          name: prod-deployer-binding
+          namespace: prod
+          role_ref:
+            kind: Role
+            name: deployer
+          subjects:
+            - kind: ServiceAccount
+              name: prod-deployer
+              namespace: prod
+
+  - vm_name: "{{ range_id }}-k8s-microk8s-rbac"
+    hostname: "{{ range_id }}-k8s-microk8s-rbac"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20
+    ip_last_octet: 13
+    ram_gb: 4
+    cpus: 4
+    linux: true
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - install_k8s
+      - telemetry
+    role_vars:
+      k8s_flavor: microk8s
       microk8s_addons:
         - dns
         - storage
+        - helm3
+      enable_headlamp: true
+      demo_pod_rce: true
+      gh_nodes_proxy: true
+      enable_custom_rbac: true
+      enable_admission_controller: true
+      kyverno_policy_type: mutating
+      kyverno_policy_preset: inject_security_context
+      telemetry_role: agent
+      falco_custom_rules:
+        - "ETCD Access"
+        - "Kubelet Remote Exec Attempt"
+      custom_pods:
+        - apiVersion: v1
+          kind: Pod
+          metadata:
+            name: nginx-test
+            namespace: default
+          spec:
+            containers:
+              - name: nginx
+                image: nginx
+      rbac_namespaces:
+        - dev
+        - prod
+      rbac_service_accounts:
+        - name: dev-reader
+          namespace: dev
+        - name: prod-deployer
+          namespace: prod
+      rbac_roles:
+        - kind: Role
+          name: pod-reader
+          namespace: dev
+          rules:
+            - apiGroups: [""]
+              resources: ["pods", "pods/log"]
+              verbs: ["get", "list", "watch"]
+        - kind: ClusterRole
+          name: secret-reader
+          rules:
+            - apiGroups: [""]
+              resources: ["secrets"]
+              verbs: ["get", "list"]
+        - kind: Role
+          name: deployer
+          namespace: prod
+          rules:
+            - apiGroups: ["apps"]
+              resources: ["deployments", "replicasets"]
+              verbs: ["get", "list", "watch", "create", "update", "patch"]
+            - apiGroups: [""]
+              resources: ["pods", "services", "configmaps"]
+              verbs: ["get", "list", "watch", "create", "update", "patch"]
+      rbac_bindings:
+        - kind: RoleBinding
+          name: dev-reader-binding
+          namespace: dev
+          role_ref:
+            kind: Role
+            name: pod-reader
+          subjects:
+            - kind: ServiceAccount
+              name: dev-reader
+              namespace: dev
+        - kind: RoleBinding
+          name: prod-deployer-binding
+          namespace: prod
+          role_ref:
+            kind: Role
+            name: deployer
+          subjects:
+            - kind: ServiceAccount
+              name: prod-deployer
+              namespace: prod
 
-
-
-
-
-
-
-
+  - vm_name: "{{ range_id }}-k8s-microk8s-01"
+    hostname: "{{ range_id }}-k8s-microk8s-01"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20
+    ip_last_octet: 11
+    ram_gb: 4
+    cpus: 4
+    linux: true
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - install_k8s
+      - telemetry
+    role_vars:
+      k8s_flavor: microk8s
+      microk8s_addons:
+        - dns
+        - storage
+        - helm3
+      enable_pod_security_admission: true
+      psa_namespaces:
+        - name: default
+          enforce: baseline
+          audit: restricted
+          warn: restricted
+        - name: restricted-ns
+          enforce: restricted
+          audit: restricted
+          warn: restricted
+      telemetry_role: agent
+      ui: grafana

@@ -1,4 +1,8 @@
 ---
+- name: Set kubectl command based on flavor
+  ansible.builtin.set_fact:
+    _kubectl: "{{ 'microk8s kubectl' if k8s_flavor | default('microk8s') == 'microk8s' else 'kubectl' }}"
+
 - name: Install Helm
   community.general.snap:
     name: helm
@@ -13,51 +17,103 @@
     update_cache: yes
 - name: install pre-requisites
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   ansible.builtin.pip:
     name:
       - virtualenv
       - openshift
       - pyyaml
-      - kubernetes 
-    virtualenv: "/home/{{ microk8s_user }}/.venv"
+      - kubernetes
+    virtualenv: "/home/{{ k8s_user }}/.venv"
     virtualenv_command: /usr/bin/python3 -m venv
 
 - name: Configure falcosidekick
   become: true
-  become_user: "{{ microk8s_user }}"
-  block: 
+  become_user: "{{ k8s_user }}"
+  block:
     - name: Add falcosidekick
       kubernetes.core.helm:
         name: falcosidekick
         chart_ref: falcosecurity/falcosidekick
-        release_namespace: falco
+        release_namespace: "{{ falco_namespace }}"
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
         values:
           enabled: true
           replicaCount: 1
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
           service:
-            type: ClusterIP
+            type: "{{ 'NodePort' if falcosidekick_nodeport | default(0) | int > 0 else 'ClusterIP' }}"
             port: 2801
+            nodePort: "{{ falcosidekick_nodeport if falcosidekick_nodeport | default(0) | int > 0 else omit }}"
           config:
             debug: true
             loki:
-              hostport: "http://loki.grafana.svc.cluster.local:3100"
+              hostport: "http://loki.{{ grafana_namespace }}.svc.cluster.local:3100"
+              customlabels: "service_name:falco"
+
+    - name: Wait for Falcosidekick to be ready
+      ansible.builtin.command:
+        cmd: "{{ _kubectl }} rollout status deployment falcosidekick -n {{ falco_namespace }} --timeout=180s"
+      environment:
+        KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+      changed_when: false
+
+    - name: Restart Falco DaemonSet to connect to Falcosidekick
+      ansible.builtin.command:
+        cmd: "{{ _kubectl }} rollout restart daemonset falco -n {{ falco_namespace }}"
+      environment:
+        KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+      changed_when: true
+
+    - name: Wait for Falco DaemonSet to be ready
+      ansible.builtin.command:
+        cmd: "{{ _kubectl }} rollout status daemonset falco -n {{ falco_namespace }} --timeout=300s"
+      environment:
+        KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+      changed_when: false
+      ignore_errors: true
+      register: falco_rollout
+
+    - name: Show Falco pod state (debug on rollout failure)
+      ansible.builtin.shell: |
+        echo "=== pods ===" && \
+        {{ _kubectl }} get pods -n {{ falco_namespace }} -o wide && \
+        echo "=== events ===" && \
+        {{ _kubectl }} get events -n {{ falco_namespace }} --sort-by='.lastTimestamp' | tail -20 && \
+        echo "=== logs ===" && \
+        {{ _kubectl }} logs -n {{ falco_namespace }} -l app.kubernetes.io/name=falco --tail=40 2>/dev/null || true
+      environment:
+        KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+      changed_when: false
+      when: falco_rollout is failed
 
 - name: Configure Loki and Grafana
   become: true
-  become_user: "{{ microk8s_user }}"
+  become_user: "{{ k8s_user }}"
   block:
     - name: Add Grafana Helm repo
       kubernetes.core.helm_repository:
         name: grafana
         repo_url: https://grafana.github.io/helm-charts
+    - name: Remove any pending Loki Helm release
+      ansible.builtin.command:
+        cmd: >
+          helm uninstall loki -n {{ grafana_namespace }} --no-hooks
+          --kubeconfig /home/{{ k8s_user }}/.kube/config
+      ignore_errors: true
+      changed_when: false
+
     - name: Deploy Loki
       kubernetes.core.helm:
         update_repo_cache: true
         name: loki
         chart_ref: "grafana/loki"
-        release_namespace: grafana
+        release_namespace: "{{ grafana_namespace }}"
         create_namespace: true
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
         values:
           deploymentMode: SingleBinary
           service:
@@ -72,11 +128,18 @@
             auth_enabled: false
             commonConfig:
               replication_factor: 1
+              ring:
+                kvstore:
+                  store: memberlist
+            memberlistConfig:
+              join_members: []
+            storage:
+              type: filesystem
             schemaConfig:
               configs:
                 - from: "2024-04-01"
                   store: tsdb
-                  object_store: s3
+                  object_store: filesystem
                   schema: v13
                   index:
                     prefix: loki_index_
@@ -89,9 +152,23 @@
             pattern_ingester:
               enabled: true
           minio:
-            enabled: true
+            enabled: false
           singleBinary:
             replicas: 1
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+            persistence:
+              enabled: false
+            extraVolumes:
+              - name: data
+                emptyDir: {}
+            extraVolumeMounts:
+              - name: data
+                mountPath: /var/loki
+          persistence:
+            enabled: false
           backend:
             replicas: 0
           read:
@@ -127,13 +204,18 @@
       kubernetes.core.helm:
         name: grafana
         chart_ref: "grafana/grafana"
-        release_namespace: grafana
+        release_namespace: "{{ grafana_namespace }}"
         create_namespace: false
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
         values:
            adminPassword: admin
+           tolerations:
+             - key: node-role.kubernetes.io/control-plane
+               operator: Exists
+               effect: NoSchedule
            service:
             type: NodePort
-            nodePort: 30147
+            nodePort: "{{ grafana_nodeport }}"
            datasources:
             datasources.yaml:
               apiVersion: 1
@@ -141,7 +223,7 @@
                 - name: Loki
                   type: loki
                   access: proxy
-                  url: "http://loki.grafana.svc.cluster.local:3100"
+                  url: "http://loki.{{ grafana_namespace }}.svc.cluster.local:3100"
                   isDefault: true
   
 

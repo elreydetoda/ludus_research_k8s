@@ -1,0 +1,68 @@
+- name: "Custom RBAC | create namespace '{{ item }}'"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ item }}"
+  loop: "{{ rbac_namespaces }}"
+  when: rbac_namespaces | length > 0
+
+- name: "Custom RBAC | create ServiceAccount '{{ item.name }}' in '{{ item.namespace }}'"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ item.name }}"
+        namespace: "{{ item.namespace }}"
+  loop: "{{ rbac_service_accounts }}"
+  when: rbac_service_accounts | length > 0
+
+- name: "Custom RBAC | create {{ item.kind }} '{{ item.name }}'"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: "{{ item.kind }}"
+      metadata:
+        name: "{{ item.name }}"
+        namespace: "{{ item.namespace | default(omit) }}"
+      rules: "{{ item.rules }}"
+  loop: "{{ rbac_roles }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
+  when: rbac_roles | length > 0
+
+- name: "Custom RBAC | bind {{ item.kind }} '{{ item.name }}'"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: "{{ item.kind }}"
+      metadata:
+        name: "{{ item.name }}"
+        namespace: "{{ item.namespace | default(omit) }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: "{{ item.role_ref.kind }}"
+        name: "{{ item.role_ref.name }}"
+      subjects: "{{ item.subjects }}"
+  loop: "{{ rbac_bindings }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
+  when: rbac_bindings | length > 0

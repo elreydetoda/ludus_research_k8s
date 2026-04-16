@@ -1,17 +1,28 @@
 - name: "Install MicroK8s"
   ansible.builtin.include_tasks: microk8s.yml
+  when:
+    - k8s_flavor | default('microk8s') == 'microk8s'
+    - not (mythic_server | default(false) | bool)
+
+- name: "Install kubeadm cluster"
+  ansible.builtin.include_tasks: kubeadm.yml
+  when: k8s_flavor | default('microk8s') == 'kubeadm'
 
 - name: Configure unauthenticated API Access
-  ansible.builtin.include_tasks: unauth_api.yml 
-  when: enable_unauth_api is true
+  ansible.builtin.include_tasks: unauth_api.yml
+  when: enable_unauth_api | default(false) | bool or enable_unauth_kubelet | default(false) | bool
 
 - name: Configure ETCD exposure
   ansible.builtin.include_tasks: unauth_etcd.yml
-  when: unauth_etcd is true and not multinode
+  when: >
+    unauth_etcd | default(false) | bool and
+    (not multinode | default(false) | bool or
+     (k8s_flavor | default('microk8s') == 'kubeadm' and not worker_only | default(false) | bool))
 
 - name: Configure network policies
   ansible.builtin.include_tasks: network_policies.yml
-  when: enable_network_policies is true
+  when: >
+    (k8s_flavor | default('microk8s') == 'microk8s' and enable_network_policies | default(false) | bool)
 
 - name: Launch vulnerable application with RCE
   ansible.builtin.include_tasks: pod_rce.yml
@@ -20,6 +31,10 @@
 - name: RCE Via Nodes/Proxy Get
   ansible.builtin.include_tasks: gh_nodes_proxy.yml
   when: gh_nodes_proxy is true
+
+- name: Configure Pod Security Admission
+  ansible.builtin.include_tasks: pod_security_admission.yml
+  when: enable_pod_security_admission | default(false) | bool
 
 - name: Deploy legitimate admission controller
   ansible.builtin.include_tasks: admission-controller.yml
@@ -36,3 +51,29 @@
 - name: Provision attack chain environment (prod env + vulnerable ingress)
   ansible.builtin.include_tasks: attack_chain.yml
   when: enable_attack_chain is true
+
+- name: Deploy C2 agent pod
+  ansible.builtin.include_tasks: c2_pod.yml
+  when: enable_c2_pod | default(false) | bool
+
+- name: Install Mythic C2 server
+  ansible.builtin.include_tasks: mythic.yml
+  when: mythic_server | default(false) | bool
+
+- name: Install Headlamp dashboard
+  ansible.builtin.include_tasks: headlamp.yml
+  when: enable_headlamp | default(false) | bool
+
+- name: Apply custom RBAC roles and bindings
+  ansible.builtin.include_tasks: custom_rbac.yml
+  when: >
+    enable_custom_rbac | default(false) | bool and (
+      rbac_namespaces | default([]) | length > 0 or
+      rbac_service_accounts | default([]) | length > 0 or
+      rbac_roles | default([]) | length > 0 or
+      rbac_bindings | default([]) | length > 0
+    )
+
+- name: Apply custom pod manifests
+  ansible.builtin.include_tasks: custom_pods.yml
+  when: custom_pods | default([]) | length > 0

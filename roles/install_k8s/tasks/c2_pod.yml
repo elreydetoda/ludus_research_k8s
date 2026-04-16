@@ -1,0 +1,264 @@
+---
+- name: Set flavor-specific commands
+  ansible.builtin.set_fact:
+    _ctr: "{{ 'microk8s ctr' if k8s_flavor | default('microk8s') == 'microk8s' else 'ctr -n k8s.io' }}"
+
+- name: Deploy C2 agent pod
+  when: enable_c2_pod | bool
+  block:
+    - name: Install kubernetes Python library
+      ansible.builtin.apt:
+        name: python3-kubernetes
+        state: present
+
+    - name: Install podman for image build
+      ansible.builtin.apt:
+        name: podman
+        state: present
+
+    - name: Check if c2-agent already imported into containerd
+      ansible.builtin.stat:
+        path: /opt/.c2-agent-imported
+      register: c2_imported
+
+    - name: Poll Mythic server until Poseidon payload is ready
+      ansible.builtin.stat:
+        path: "{{ mythic_payload_dir }}/poseidon-linux-agent"
+      delegate_to: "{{ mythic_server_hostname }}"
+      register: payload_stat
+      until: payload_stat.stat.exists
+      retries: 60
+      delay: 60
+      when: not c2_imported.stat.exists
+
+    - name: Fetch Poseidon payload from Mythic server to controller
+      ansible.builtin.fetch:
+        src: "{{ mythic_payload_dir }}/poseidon-linux-agent"
+        dest: "/tmp/poseidon-linux-agent"
+        flat: true
+      delegate_to: "{{ mythic_server_hostname }}"
+      when: not c2_imported.stat.exists
+
+    - name: Copy c2-agent build context to target
+      ansible.builtin.copy:
+        src: ./deps/c2-agent/
+        dest: /tmp/c2-agent/
+        mode: "0755"
+      when: not c2_imported.stat.exists
+
+    - name: Copy Poseidon payload into build context
+      ansible.builtin.copy:
+        src: /tmp/poseidon-linux-agent
+        dest: /tmp/c2-agent/poseidon-linux-agent
+        mode: "0755"
+      when: not c2_imported.stat.exists
+
+    - name: Build c2-agent image with podman
+      ansible.builtin.command:
+        cmd: podman build -t c2-agent:latest /tmp/c2-agent
+      when: not c2_imported.stat.exists
+
+    - name: Import c2-agent image into MicroK8s containerd
+      ansible.builtin.shell:
+        cmd: podman save c2-agent:latest | {{ _ctr }} images import -
+      when: not c2_imported.stat.exists
+
+    - name: Mark c2-agent image as imported
+      ansible.builtin.file:
+        path: /opt/.c2-agent-imported
+        state: touch
+        mode: "0600"
+      when: not c2_imported.stat.exists
+
+    - name: Create C2 pod namespace
+      when: c2_pod_namespace != "default"
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ c2_pod_namespace }}"
+
+    - name: Create C2 pod ServiceAccount
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: "{{ c2_pod_service_account }}"
+            namespace: "{{ c2_pod_namespace }}"
+
+    # --- minimal: namespace-scoped read on pods + services ---
+    - name: Create minimal Role
+      when: c2_pod_sa_permissions == "minimal"
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: "{{ c2_pod_service_account }}-role"
+            namespace: "{{ c2_pod_namespace }}"
+          rules:
+            - apiGroups: [""]
+              resources: ["pods", "services"]
+              verbs: ["get", "list"]
+
+    - name: Create minimal RoleBinding
+      when: c2_pod_sa_permissions == "minimal"
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: "{{ c2_pod_service_account }}-rb"
+            namespace: "{{ c2_pod_namespace }}"
+          subjects:
+            - kind: ServiceAccount
+              name: "{{ c2_pod_service_account }}"
+              namespace: "{{ c2_pod_namespace }}"
+          roleRef:
+            kind: Role
+            name: "{{ c2_pod_service_account }}-role"
+            apiGroup: rbac.authorization.k8s.io
+
+    # --- read-secrets: cluster-wide read on secrets, pods, services, namespaces ---
+    - name: Create read-secrets ClusterRole
+      when: c2_pod_sa_permissions == "read-secrets"
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: "{{ c2_pod_service_account }}-cr"
+          rules:
+            - apiGroups: [""]
+              resources: ["secrets", "pods", "services", "namespaces"]
+              verbs: ["get", "list"]
+
+    - name: Create read-secrets ClusterRoleBinding
+      when: c2_pod_sa_permissions == "read-secrets"
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: "{{ c2_pod_service_account }}-crb"
+          subjects:
+            - kind: ServiceAccount
+              name: "{{ c2_pod_service_account }}"
+              namespace: "{{ c2_pod_namespace }}"
+          roleRef:
+            kind: ClusterRole
+            name: "{{ c2_pod_service_account }}-cr"
+            apiGroup: rbac.authorization.k8s.io
+
+    # --- cluster-admin: bind built-in cluster-admin ClusterRole ---
+    - name: Create cluster-admin ClusterRoleBinding
+      when: c2_pod_sa_permissions == "cluster-admin"
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: "{{ c2_pod_service_account }}-cluster-admin"
+          subjects:
+            - kind: ServiceAccount
+              name: "{{ c2_pod_service_account }}"
+              namespace: "{{ c2_pod_namespace }}"
+          roleRef:
+            kind: ClusterRole
+            name: cluster-admin
+            apiGroup: rbac.authorization.k8s.io
+
+    - name: Remove existing C2 pod to pick up new image
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "{{ c2_pod_name }}"
+            namespace: "{{ c2_pod_namespace }}"
+      when: not c2_imported.stat.exists
+
+    - name: Deploy C2 agent pod
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "{{ c2_pod_name }}"
+            namespace: "{{ c2_pod_namespace }}"
+            labels:
+              app: "{{ c2_pod_name }}"
+              purpose: monitoring
+          spec:
+            serviceAccountName: "{{ c2_pod_service_account }}"
+            automountServiceAccountToken: true
+            containers:
+              - name: "{{ c2_pod_name }}"
+                image: "{{ c2_pod_image }}"
+                imagePullPolicy: Never
+
+    - name: Wait for C2 pod to reach Running phase
+      become: true
+      become_user: "{{ k8s_user }}"
+      kubernetes.core.k8s_info:
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+        kind: Pod
+        name: "{{ c2_pod_name }}"
+        namespace: "{{ c2_pod_namespace }}"
+      register: c2_pod_info
+      until: >
+        c2_pod_info.resources | length > 0 and
+        c2_pod_info.resources[0].status.phase == "Running"
+      retries: 20
+      delay: 10
+
+    - name: Deploy Falco C2 detection rules
+      ansible.builtin.copy:
+        src: ./deps/c2-agent/falco-rules.yaml
+        dest: "/home/{{ k8s_user }}/rules.d/c2-agent-rules.yaml"
+        owner: "{{ k8s_user }}"
+        group: "{{ k8s_user }}"
+        mode: "0644"
+
+    - name: Remove build context
+      ansible.builtin.file:
+        path: /tmp/c2-agent
+        state: absent

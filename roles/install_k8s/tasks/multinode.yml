@@ -1,22 +1,32 @@
-- name: Get microk8s cluster invite
-  ansible.builtin.shell:
-    cmd: microk8s add-node --token 0123456789abcdef0123456789abcdef --token-ttl 3600 | awk '/microk8s join/{print; exit}'
-  register: microk8s_invite
+- name: Wait for MicroK8s control plane to be ready before joining
+  ansible.builtin.command:
+    cmd: microk8s status --wait-ready
+  delegate_to: "{{ k8s_control_plane | default(inventory_hostname, true) }}"
   when:
     - k8s_flavor == 'microk8s'
-    - control_node is true
+    - worker_only | default(false) | bool or node | default(false) | bool
+  changed_when: false
+
+- name: Get microk8s join command from control plane
+  ansible.builtin.shell:
+    cmd: "microk8s add-node --token {{ microk8s_join_token }} --token-ttl 3600 | awk '/microk8s join/{print; exit}'"
+  delegate_to: "{{ k8s_control_plane | default(inventory_hostname, true) }}"
+  register: _microk8s_invite
+  when:
+    - k8s_flavor == 'microk8s'
+    - worker_only | default(false) | bool or node | default(false) | bool
+  changed_when: false
 
 - name: Join microk8s cluster as worker
   ansible.builtin.command:
-    cmd: "{{ hostvars[groups['controller'][0]].microk8s_invite.stdout }} --worker"
+    cmd: "{{ _microk8s_invite.stdout }} --worker"
   when:
     - k8s_flavor == 'microk8s'
-    - worker_only is true
+    - worker_only | default(false) | bool
 
 - name: Join microk8s cluster as full node
   ansible.builtin.command:
-    cmd: "{{ hostvars[groups['controller'][0]].microk8s_invite.stdout }}"
+    cmd: "{{ _microk8s_invite.stdout }}"
   when:
     - k8s_flavor == 'microk8s'
-    - node is true
-
+    - node | default(false) | bool

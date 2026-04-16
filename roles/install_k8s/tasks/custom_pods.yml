@@ -1,0 +1,7 @@
+- name: Apply custom pod manifests
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition: "{{ item if item is mapping else (lookup('file', item) | from_yaml) }}"
+  loop: "{{ custom_pods }}"
+  when: custom_pods | length > 0

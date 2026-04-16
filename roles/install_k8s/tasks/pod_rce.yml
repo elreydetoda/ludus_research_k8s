@@ -1,4 +1,8 @@
 ---
+- name: Set flavor-specific commands
+  ansible.builtin.set_fact:
+    _ctr: "{{ 'microk8s ctr' if k8s_flavor | default('microk8s') == 'microk8s' else 'ctr -n k8s.io' }}"
+
 - name: Install kubernetes Python library
   ansible.builtin.apt:
     name: python3-kubernetes
@@ -10,26 +14,26 @@
 
     - name: Create app directory on remote
       ansible.builtin.file:
-        path: "/home/{{ microk8s_user }}/vuln-ping"
+        path: "/home/{{ k8s_user }}/vuln-ping"
         state: directory
-        owner: "{{ microk8s_user }}"
-        group: "{{ microk8s_user }}"
+        owner: "{{ k8s_user }}"
+        group: "{{ k8s_user }}"
         mode: "0755"
 
     - name: Copy app.py to remote
       ansible.builtin.copy:
         src: ./deps/vuln-ping/app.py
-        dest: "/home/{{ microk8s_user }}/vuln-ping/app.py"
-        owner: "{{ microk8s_user }}"
-        group: "{{ microk8s_user }}"
+        dest: "/home/{{ k8s_user }}/vuln-ping/app.py"
+        owner: "{{ k8s_user }}"
+        group: "{{ k8s_user }}"
         mode: "0644"
 
     - name: Copy Dockerfile to remote
       ansible.builtin.copy:
         src: ./deps/vuln-ping/Dockerfile
-        dest: "/home/{{ microk8s_user }}/vuln-ping/Dockerfile"
-        owner: "{{ microk8s_user }}"
-        group: "{{ microk8s_user }}"
+        dest: "/home/{{ k8s_user }}/vuln-ping/Dockerfile"
+        owner: "{{ k8s_user }}"
+        group: "{{ k8s_user }}"
         mode: "0644"
 
     - name: Install podman for image builds
@@ -39,19 +43,19 @@
 
     - name: Build image with podman
       ansible.builtin.command:
-        cmd: podman build -t vuln-ping:latest /home/{{ microk8s_user }}/vuln-ping
+        cmd: podman build -t vuln-ping:latest /home/{{ k8s_user }}/vuln-ping
       changed_when: true
 
     - name: Import image into MicroK8s containerd
       ansible.builtin.shell:
-        cmd: podman save vuln-ping:latest | microk8s ctr images import -
+        cmd: podman save vuln-ping:latest | {{ _ctr }} images import -
       changed_when: true
 
     - name: Create vuln-rce namespace
       become: true
-      become_user: "{{ microk8s_user }}"
+      become_user: "{{ k8s_user }}"
       kubernetes.core.k8s:
-        kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
         state: present
         definition:
           apiVersion: v1
@@ -61,9 +65,9 @@
 
     - name: Deploy vulnerable ping app
       become: true
-      become_user: "{{ microk8s_user }}"
+      become_user: "{{ k8s_user }}"
       kubernetes.core.k8s:
-        kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
         state: present
         definition:
           apiVersion: apps/v1
@@ -92,9 +96,9 @@
 
     - name: Expose vulnerable app via NodePort
       become: true
-      become_user: "{{ microk8s_user }}"
+      become_user: "{{ k8s_user }}"
       kubernetes.core.k8s:
-        kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+        kubeconfig: "/home/{{ k8s_user }}/.kube/config"
         state: present
         definition:
           apiVersion: v1

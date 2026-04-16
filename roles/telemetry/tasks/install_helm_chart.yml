@@ -1,0 +1,43 @@
+---
+# Install arbitrary Helm charts defined in install_helm_chart list.
+# Each entry requires: repo_name, repo_url, chart_ref, release_name
+# Optional per entry: namespace (default "default"), create_namespace (default true),
+#                     chart_version (default latest), values (default {})
+#
+# Example:
+#   install_helm_chart:
+#     - repo_name: metrics-server
+#       repo_url: https://kubernetes-sigs.github.io/metrics-server/
+#       chart_ref: metrics-server/metrics-server
+#       release_name: metrics-server
+#       namespace: kube-system
+#       values:
+#         args:
+#           - --kubelet-insecure-tls
+
+- name: Add Helm repository for custom charts
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.helm_repository:
+    name: "{{ item.repo_name }}"
+    repo_url: "{{ item.repo_url }}"
+  loop: "{{ install_helm_chart }}"
+  loop_control:
+    label: "{{ item.release_name }}"
+
+- name: Install custom Helm charts
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.helm:
+    update_repo_cache: true
+    name: "{{ item.release_name }}"
+    chart_ref: "{{ item.chart_ref }}"
+    chart_version: "{{ item.chart_version | default(omit, true) }}"
+    release_namespace: "{{ item.namespace | default('default') }}"
+    create_namespace: "{{ item.create_namespace | default(true) }}"
+    values: "{{ item.values | default({}) }}"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+  loop: "{{ install_helm_chart }}"
+  loop_control:
+    label: "{{ item.release_name }}"

@@ -4,8 +4,31 @@
 microk8s_base: "/var/snap/microk8s/"
 microk8s_apiserver: "/var/snap/microk8s/current/args/kube-apiserver"
 microk8s_user: "localuser"
+k8s_flavor: "microk8s"
+k8s_user: "{{ microk8s_user }}"
 telemetry_hostname: "falcosidekick"
 ui: ''
+
+# Falco namespace and chart settings
+falco_namespace: "falco"
+falco_chart_version: ""        # empty = latest
+falco_nodeport: 30007          # NodePort for the k8saudit webhook service
+falcosidekick_nodeport: 0      # 0 = ClusterIP (internal only); non-zero = NodePort
+
+# Grafana/Loki namespace and service settings
+grafana_namespace: "grafana"
+grafana_nodeport: 30147
+
+# install_helm_chart — install arbitrary Helm charts after cluster setup.
+# Each entry requires: repo_name, repo_url, chart_ref, release_name.
+# Optional per entry: namespace (default "default"), create_namespace (default true),
+#                     chart_version (default latest), values (default {}).
+install_helm_chart: []
+
+# falco_custom_rules — list of rule names (by exact string) to apply from
+# roles/telemetry/tasks/deps/rules.yaml. All macros and lists in that file
+# are always included for dependency resolution. Default: no rules applied.
+falco_custom_rules: []
 
 # attack_chain.yml — prod environment defaults
 prod_db_name: postgres
@@ -23,6 +46,7 @@ prod_app_secret_name: prod-app-config
 vuln_ingress_version: "1.11.4"
 vuln_ingress_chart_version: "4.10.6"
 vuln_ingress_namespace: ingress-nginx
+vuln_ingress_http_nodeport: 30800
 vuln_ingress_webhook_nodeport: 32443
 # attack_chain.yml — attack simulation defaults
 attacker_nodeport_start: 30000

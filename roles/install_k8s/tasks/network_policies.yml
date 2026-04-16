@@ -1,10 +1,12 @@
-- name: Enable Calico (network policy enforcement)
+# ── MicroK8s: enable Calico addon + default-deny policy ──────────────────────
+- name: "[microk8s] Enable Calico (network policy enforcement)"
   ansible.builtin.command:
     cmd: microk8s enable community calico
-    
+  when: k8s_flavor | default('microk8s') == 'microk8s'
+
 - name: Apply default-deny network policy
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: networking.k8s.io/v1
@@ -17,3 +19,42 @@
         policyTypes:
           - Ingress
           - Egress
+  when: k8s_flavor | default('microk8s') == 'microk8s'
+
+# ── kubeadm: deploy CNI (Calico or Cilium) ───────────────────────────────────
+- name: "[kubeadm] Apply Calico CNI manifest"
+  ansible.builtin.command:
+    cmd: kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.2/manifests/calico.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  when:
+    - k8s_flavor | default('microk8s') == 'kubeadm'
+    - k8s_cni == 'calico'
+    - not (worker_only | default(false) | bool)
+  changed_when: true
+
+- name: "[kubeadm] Add Cilium Helm repository"
+  ansible.builtin.command:
+    cmd: helm repo add cilium https://helm.cilium.io/
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  when:
+    - k8s_flavor | default('microk8s') == 'kubeadm'
+    - k8s_cni == 'cilium'
+    - not (worker_only | default(false) | bool)
+  changed_when: false
+
+- name: "[kubeadm] Install Cilium CNI via Helm"
+  ansible.builtin.command:
+    cmd: >
+      helm upgrade --install cilium cilium/cilium
+      --version 1.16.6
+      --namespace kube-system
+      --set kubeProxyReplacement=false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  when:
+    - k8s_flavor | default('microk8s') == 'kubeadm'
+    - k8s_cni == 'cilium'
+    - not (worker_only | default(false) | bool)
+  changed_when: true

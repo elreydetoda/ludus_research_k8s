@@ -1,0 +1,248 @@
+---
+# ── CNI-derived facts ─────────────────────────────────────────────────────────
+- name: Set CNI pod-network CIDR fact
+  ansible.builtin.set_fact:
+    _k8s_pod_cidr: "{{ '192.168.0.0/16' if k8s_cni == 'calico' else '10.0.0.0/8' }}"
+
+# ── Swap ──────────────────────────────────────────────────────────────────────
+- name: Disable swap (runtime)
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+
+- name: Remove swap entries from /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#\n].*\sswap\s.*)$'
+    replace: '# \1'
+
+# ── Kernel modules ────────────────────────────────────────────────────────────
+- name: Persist required kernel modules
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+    mode: "0644"
+
+- name: Load kernel modules immediately
+  ansible.builtin.command: "modprobe {{ item }}"
+  loop:
+    - overlay
+    - br_netfilter
+  changed_when: false
+
+# ── sysctl ────────────────────────────────────────────────────────────────────
+- name: Set Kubernetes sysctl parameters
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/k8s.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+    mode: "0644"
+
+- name: Apply sysctl parameters
+  ansible.builtin.command: sysctl --system
+  changed_when: false
+
+# ── containerd ───────────────────────────────────────────────────────────────
+- name: Install containerd
+  ansible.builtin.apt:
+    name: containerd
+    state: present
+    update_cache: true
+
+- name: Ensure /etc/containerd directory exists
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: "0755"
+
+- name: Generate default containerd config
+  ansible.builtin.shell:
+    cmd: containerd config default > /etc/containerd/config.toml
+    creates: /etc/containerd/config.toml
+
+- name: Enable SystemdCgroup in containerd config
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup\s*=\s*false'
+    replace: 'SystemdCgroup = true'
+
+- name: Restart and enable containerd
+  ansible.builtin.systemd_service:
+    name: containerd
+    state: restarted
+    enabled: true
+
+# ── Kubernetes apt repository ─────────────────────────────────────────────────
+- name: Install apt transport packages
+  ansible.builtin.apt:
+    pkg:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gpg
+      - conntrack
+    state: present
+
+- name: Ensure /etc/apt/keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Download Kubernetes apt GPG key
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/v{{ kubeadm_version }}/deb/Release.key"
+    dest: /tmp/k8s-release.key
+    mode: "0644"
+
+- name: Install Kubernetes apt GPG key
+  ansible.builtin.shell:
+    cmd: gpg --dearmor < /tmp/k8s-release.key > /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+- name: Add Kubernetes apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubeadm_version }}/deb/ /"
+    filename: kubernetes
+    state: present
+
+- name: Install kubeadm, kubelet, kubectl
+  ansible.builtin.apt:
+    pkg:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: present
+    update_cache: true
+
+- name: Hold kubeadm, kubelet, kubectl at installed version
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+- name: Enable and start kubelet
+  ansible.builtin.systemd_service:
+    name: kubelet
+    enabled: true
+    state: started
+
+# ── Python library and Helm (needed by later tasks in the role) ───────────────
+- name: Install kubernetes Python library
+  ansible.builtin.apt:
+    name: python3-kubernetes
+    state: present
+
+- name: Install Helm
+  ansible.builtin.command:
+    cmd: snap install helm --channel=3.7/stable --classic
+    creates: /snap/bin/helm
+
+# ── kubeadm init (control plane) ──────────────────────────────────────────────
+- name: Write kubeadm init config
+  ansible.builtin.copy:
+    content: |
+      apiVersion: kubeadm.k8s.io/v1beta3
+      kind: ClusterConfiguration
+      clusterName: {{ cluster_name }}
+      networking:
+        podSubnet: {{ _k8s_pod_cidr }}
+    dest: /tmp/kubeadm-init-config.yaml
+    mode: "0644"
+  when: not (worker_only | default(false) | bool)
+
+- name: Initialise Kubernetes control plane
+  ansible.builtin.command:
+    cmd: "kubeadm init --config /tmp/kubeadm-init-config.yaml"
+    creates: /etc/kubernetes/admin.conf
+  when: not (worker_only | default(false) | bool)
+
+# ── kubeconfig ───────────────────────────────────────────────────────────────
+- name: Ensure ~/.kube directory exists for {{ k8s_user }}
+  ansible.builtin.file:
+    path: "/home/{{ k8s_user }}/.kube"
+    state: directory
+    owner: "{{ k8s_user }}"
+    group: "{{ k8s_user }}"
+    mode: "0700"
+  when: not (worker_only | default(false) | bool)
+
+- name: Copy admin.conf to user kubeconfig
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "/home/{{ k8s_user }}/.kube/config"
+    remote_src: true
+    owner: "{{ k8s_user }}"
+    group: "{{ k8s_user }}"
+    mode: "0600"
+  when: not (worker_only | default(false) | bool)
+
+# ── CNI deployment (delegated to network_policies.yml) ───────────────────────
+- name: Deploy CNI
+  ansible.builtin.include_tasks: network_policies.yml
+  when: not (worker_only | default(false) | bool)
+
+# ── Default StorageClass (local-path-provisioner) ────────────────────────────
+- name: Deploy Rancher local-path-provisioner
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      kubectl apply -f
+      https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml
+  changed_when: true
+  when: not (worker_only | default(false) | bool)
+
+- name: Set local-path as the default StorageClass
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      kubectl patch storageclass local-path
+      -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+  changed_when: true
+  when: not (worker_only | default(false) | bool)
+
+# ── Multinode ─────────────────────────────────────────────────────────────────
+- name: Wait for control plane API before joining
+  ansible.builtin.wait_for:
+    host: "127.0.0.1"
+    port: 6443
+    timeout: 300
+  delegate_to: "{{ k8s_control_plane | default(inventory_hostname, true) }}"
+  when:
+    - multinode | default(false) | bool
+    - worker_only | default(false) | bool
+
+- name: Get join command from control plane
+  ansible.builtin.command:
+    cmd: kubeadm token create --print-join-command
+  delegate_to: "{{ k8s_control_plane | default(inventory_hostname, true) }}"
+  register: _kubeadm_join_command
+  when:
+    - multinode | default(false) | bool
+    - worker_only | default(false) | bool
+  changed_when: false
+
+- name: Join cluster as worker
+  ansible.builtin.command:
+    cmd: "{{ _kubeadm_join_command.stdout }}"
+    creates: /etc/kubernetes/kubelet.conf
+  when:
+    - multinode | default(false) | bool
+    - worker_only | default(false) | bool
+
+# ── Shared housekeeping (mirrors microk8s.yml pattern) ────────────────────────
+- name: Create rules directory for {{ k8s_user }}
+  ansible.builtin.file:
+    path: "/home/{{ k8s_user }}/rules.d"
+    state: directory
+    mode: "0755"
+    owner: "{{ k8s_user }}"
+    group: "{{ k8s_user }}"

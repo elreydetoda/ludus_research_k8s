@@ -1,0 +1,32 @@
+- name: "Pod Security Admission | create namespace '{{ item.name }}' if absent"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ item.name }}"
+  loop: "{{ psa_namespaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: "Pod Security Admission | label namespace '{{ item.name }}'"
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    state: patched
+    kind: Namespace
+    name: "{{ item.name }}"
+    definition:
+      metadata:
+        labels:
+          pod-security.kubernetes.io/enforce: "{{ item.enforce | default('baseline') }}"
+          pod-security.kubernetes.io/audit: "{{ item.audit | default('restricted') }}"
+          pod-security.kubernetes.io/warn: "{{ item.warn | default('restricted') }}"
+  loop: "{{ psa_namespaces }}"
+  loop_control:
+    label: "{{ item.name }}"

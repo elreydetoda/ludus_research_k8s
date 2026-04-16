@@ -1,7 +1,7 @@
 
 - name: Create nodes-proxy-reader ClusterRole
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: rbac.authorization.k8s.io/v1
@@ -15,7 +15,7 @@
 
 - name: Create attacker ServiceAccount
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: v1
@@ -26,7 +26,7 @@
 
 - name: Bind nodes-proxy-reader to attacker ServiceAccount
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: rbac.authorization.k8s.io/v1
@@ -44,7 +44,7 @@
 
 - name: Deploy nginx pod
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: v1
@@ -62,7 +62,7 @@
 
 - name: Delete attacker pod if it exists
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: absent
     api_version: v1
     kind: Pod
@@ -72,7 +72,7 @@
 
 - name: Deploy attacker pod
   kubernetes.core.k8s:
-    kubeconfig: "/home/{{ microk8s_user }}/.kube/config"
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
     state: present
     definition:
       apiVersion: v1

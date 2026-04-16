@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://docs.ludus.cloud/schemas/range-config.json
+#
+# Dedicated single-node range for the CVE-2025-1974 → ransomware attack chain.
+#
+# What this provisions:
+#   install_k8s  — microk8s (single node, storage addon, no taint issues)
+#                  + prod namespace, PostgreSQL, vulnerable ingress-nginx (CVE-2025-1974),
+#                    RBAC misconfiguration, and ransomware webhook server (enable_attack_chain)
+#   telemetry    — Falco (eBPF + k8saudit), Loki, Grafana, then runs all 8 attack steps
+#                  and generates detectable telemetry (enable_attack_chain)
+#
+# Falco rules loaded (from roles/telemetry/tasks/deps/rules.yaml):
+#   These cover the syscall and k8saudit signals generated at each step.
+#   The full per-step rule set lives in deps/attack-chain-rules.yaml — wire it
+#   up via a falco_custom_rules entry once it is merged into rules.yaml.
+#
+# Usage:
+#   ludus range config set -f config-attack-chain.yml
+#   ludus range deploy
+
+ludus:
+  - vm_name: "{{ range_id }}-attack-chain-01"
+    hostname: "{{ range_id }}-attack-chain-01"
+    template: ubuntu-24.04-x64-server-template
+    vlan: 20
+    ip_last_octet: 20
+    ram_gb: 8
+    cpus: 4
+    linux: true
+    testing:
+      snapshot: false
+      block_internet: false
+    roles:
+      - install_k8s
+      - telemetry
+    role_vars:
+      # ── Cluster ──────────────────────────────────────────────────────────
+      k8s_flavor: microk8s
+      microk8s_addons:
+        - dns
+        - storage   # provides the default StorageClass (hostpath) for PVCs
+        - helm3
+
+      # ── Attack chain ─────────────────────────────────────────────────────
+      # Triggers attack_chain.yml (install_k8s) and attack_chain_exec.yml (telemetry)
+      enable_attack_chain: true
+
+      # ── Telemetry ─────────────────────────────────────────────────────────
+      telemetry_role: agent   # installs Falco + ships to Grafana/Loki on this node
+      ui: grafana
+
+      # ── Falco detection rules ─────────────────────────────────────────────
+      # Rules selected to fire at each attack chain step:
+      #   Step 1  recon           — (attack-chain-rules.yaml: Port Scanner Executed on Cluster Node)
+      #   Step 2  RCE / exec      — Interactive Exec into System Namespace Pod (k8saudit)
+      #   Step 3  token theft     — Pod ServiceAccount Token File Access (syscall)
+      #                             Suspicious ServiceAccount Enumeration (k8saudit)
+      #   Step 4  secret read     — (attack-chain-rules.yaml: Cross-Namespace Secret Read)
+      #   Step 5  lateral DB      — (attack-chain-rules.yaml: Database Port Connection from Unexpected Namespace)
+      #   Step 6  webhook reg     — Modify Admission Webhook Configuration (k8saudit)
+      #                             Namespaced SA Bound to ClusterRole (k8saudit)
+      #   Step 7  image build     — (attack-chain-rules.yaml: Container Image Built on Cluster Node)
+      #   Step 8  ransomware      — (attack-chain-rules.yaml: Bulk File Writes on Mounted Volume)
+      #                             CLI Token Usage by Local Process (syscall)
+      falco_custom_rules:
+        - "Pod ServiceAccount Token File Access"
+        - "Suspicious ServiceAccount Enumeration"
+        - "Modify Admission Webhook Configuration"
+        - "Read Admission Webhook Configurations"
+        - "Namespaced SA Bound to ClusterRole"
+        - "RBAC Wildcard Permissions Detected"
+        - "CLI Token Usage by Local Process"
