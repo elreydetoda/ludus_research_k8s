@@ -13,7 +13,6 @@ k8s_control_plane: ""
 enable_unauth_api: false
 enable_unauth_kubelet: false
 node: false
-multinode: false
 microk8s_user: localuser
 microk8s_join_token: "0123456789abcdef0123456789abcdef"
 microk8s_addons:
@@ -24,9 +23,6 @@ k8s_node_name: "{{ ansible_hostname | lower }}"
 
 # k8s flavor — microk8s (default) or kubeadm
 k8s_flavor: "microk8s"
-
-# Name of the Kubernetes cluster (used in kubeadm ClusterConfiguration and kubeconfig context)
-cluster_name: "kubernetes"
 
 # MicroK8s snap channel, e.g. "1.31/stable". Empty string installs the latest stable.
 microk8s_version: ""
@@ -47,7 +43,6 @@ kubeadm_version: "1.31"
 k8s_cni: "calico"
 
 # custom_rbac.yml — user-defined Roles, ClusterRoles, RoleBindings, ClusterRoleBindings
-enable_custom_rbac: false
 rbac_namespaces: []
 rbac_service_accounts: []
 rbac_roles: []
@@ -59,39 +54,6 @@ headlamp_namespace: "kube-system"
 headlamp_nodeport: 30095
 headlamp_plugins_manager_enabled: false
 
-# attack_chain.yml — prod environment defaults
-prod_db_name: postgres
-prod_db_user: produser
-prod_db_password: "Pr0dPassw0rd!"
-prod_db_image: "postgres:15"
-prod_db_port: 5432
-prod_db_storage_size: 1Gi
-prod_cicd_sa: prod-cicd
-prod_cicd_token_secret: prod-cicd-token
-prod_db_secret_name: prod-db-credentials
-prod_app_secret_name: prod-app-config
-
-# attack_chain.yml — vulnerable ingress-nginx defaults
-vuln_ingress_version: "1.11.4"
-vuln_ingress_chart_version: "4.10.6"
-vuln_ingress_namespace: ingress-nginx
-vuln_ingress_http_nodeport: 30800
-vuln_ingress_webhook_nodeport: 32443
-
-# attack_chain.yml — attack simulation defaults
-attacker_nodeport_start: 30000
-attacker_nodeport_end: 32767
-attacker_payload_c: /tmp/payload.c
-attacker_payload_so: /tmp/payload.so
-attacker_exploit_script: /tmp/ingressnightmare.py
-attacker_exploit_marker: /tmp/pwned-cve-2025-1974
-ingress_sa_token_path: /var/run/secrets/kubernetes.io/serviceaccount/token
-ransomware_webhook_name: ransomware-injector
-ransomware_webhook_namespace: default
-ransomware_image: "localhost/ludus-ransomware-sidecar:latest"
-ransomware_dockerfile_dest: /tmp/ransomware-sidecar
-ransomware_fernet_key: "ZmDfcTF7_60GrrY167zsiPd2H8890ZmmD4OjB_6zgOM="
-
 # mythic.yml — Mythic C2 server variables
 mythic_server: false
 mythic_server_ip: ""
@@ -100,7 +62,7 @@ mythic_admin_password: "{{ lookup('password', '/tmp/.mythic_admin_password chars
 mythic_http_profile_port: 80
 mythic_version: "master"
 mythic_payload_dir: "/opt/Mythic/payloads"
-mythic_server_hostname: "{{ range_id }}-mythic-01"
+mythic_server_hostname: "{{ range_id }}-mythic"
 
 # pod_security_admission.yml — Pod Security Admission (PSA) namespace labeling
 # profiles per entry: privileged | baseline | restricted
@@ -124,6 +86,7 @@ kyverno_excluded_namespaces:
   - kyverno
   - falco
   - grafana
+  - local-path-storage
 kyverno_policy_type: "validating"
 kyverno_policy_preset: "block_privileged"
 

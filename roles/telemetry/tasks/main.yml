@@ -1,27 +1,13 @@
 ---
 - name: "Falco agent on this node"
   ansible.builtin.include_tasks: falco-agent.yml
-  when:
-    - telemetry_role in ['agent', 'full']
-
-- name: "Falco Sidekick UI on this node"
-  ansible.builtin.include_tasks: falco-ui.yml
-  when:
-    - telemetry_role in ['ui', 'full']
 
 - name: "Configure Grafana/Loki on this node"
   ansible.builtin.include_tasks: grafana.yml
-  when:
-    - ui == 'grafana'
-    - telemetry_role in ['agent', 'full']
+  when: ui == 'grafana'
 
-- name: "Run attack chain execution steps"
-  ansible.builtin.include_tasks: attack_chain_exec.yml
-  when: enable_attack_chain is true
-
-- name: "Install custom Helm charts"
-  ansible.builtin.include_tasks: install_helm_chart.yml
-  when: install_helm_chart | default([]) | length > 0
-
+- name: "Deploy Falcosidekick with built-in web UI"
+  ansible.builtin.include_tasks: falco-ui.yml
+  when: ui == 'falcosidekick'
 
 

@@ -24,12 +24,16 @@
     state: present
 
 - name: Wait for Kyverno admission controller to be ready
+  become: true
+  become_user: "{{ k8s_user }}"
   ansible.builtin.shell:
     cmd: |
       {{ _kubectl }} rollout status deployment/kyverno-admission-controller \
         -n kyverno --timeout=120s 2>/dev/null || \
       {{ _kubectl }} rollout status deployment/kyverno \
         -n kyverno --timeout=120s
+  environment:
+    KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
   changed_when: false
 
 - name: Wait for Kyverno webhook to register
@@ -85,7 +89,7 @@
                   containers:
                     - =(securityContext):
                         =(privileged): "false"
-                  initContainers:
+                  =(initContainers):
                     - =(securityContext):
                         =(privileged): "false"
           - name: block-hostpath-volumes

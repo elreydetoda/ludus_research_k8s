@@ -48,10 +48,6 @@
   ansible.builtin.include_tasks: anon_cluster_admin.yml
   when: anon_cluster_admin is true
 
-- name: Provision attack chain environment (prod env + vulnerable ingress)
-  ansible.builtin.include_tasks: attack_chain.yml
-  when: enable_attack_chain is true
-
 - name: Deploy C2 agent pod
   ansible.builtin.include_tasks: c2_pod.yml
   when: enable_c2_pod | default(false) | bool
@@ -67,12 +63,10 @@
 - name: Apply custom RBAC roles and bindings
   ansible.builtin.include_tasks: custom_rbac.yml
   when: >
-    enable_custom_rbac | default(false) | bool and (
-      rbac_namespaces | default([]) | length > 0 or
-      rbac_service_accounts | default([]) | length > 0 or
-      rbac_roles | default([]) | length > 0 or
-      rbac_bindings | default([]) | length > 0
-    )
+    rbac_namespaces | default([]) | length > 0 or
+    rbac_service_accounts | default([]) | length > 0 or
+    rbac_roles | default([]) | length > 0 or
+    rbac_bindings | default([]) | length > 0
 
 - name: Apply custom pod manifests
   ansible.builtin.include_tasks: custom_pods.yml

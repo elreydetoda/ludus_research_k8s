@@ -77,7 +77,6 @@
           type: NodePort
           ports:
             - port: 9765
-              nodePort: "{{ falco_nodeport }}"
               protocol: TCP
       falcoctl:
         artifact:
@@ -119,6 +118,18 @@
   changed_when: false
   environment:
     KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+
+- name: Patch k8saudit-webhook service to set NodePort
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: >
+      {{ _kubectl }} patch svc falco-k8saudit-webhook -n {{ falco_namespace }}
+      --type=merge
+      -p '{"spec":{"ports":[{"port":9765,"nodePort":{{ falco_nodeport | int }},"protocol":"TCP"}]}}'
+  environment:
+    KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+  changed_when: true
 
 # ── Audit pipeline ────────────────────────────────────────────────────────────
 - name: Configure k8s audit pipeline for Falco

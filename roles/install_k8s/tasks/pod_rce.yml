@@ -43,7 +43,7 @@
 
     - name: Build image with podman
       ansible.builtin.command:
-        cmd: podman build -t vuln-ping:latest /home/{{ k8s_user }}/vuln-ping
+        cmd: podman build --network=host -t vuln-ping:latest /home/{{ k8s_user }}/vuln-ping
       changed_when: true
 
     - name: Import image into MicroK8s containerd

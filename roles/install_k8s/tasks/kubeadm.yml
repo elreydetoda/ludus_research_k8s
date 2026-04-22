@@ -1,4 +1,10 @@
 ---
+- name: Force apt to use IPv4 (no IPv6 connectivity in lab)
+  ansible.builtin.copy:
+    content: 'Acquire::ForceIPv4 "true";'
+    dest: /etc/apt/apt.conf.d/99force-ipv4
+    mode: "0644"
+
 # ── CNI-derived facts ─────────────────────────────────────────────────────────
 - name: Set CNI pod-network CIDR fact
   ansible.builtin.set_fact:
@@ -150,7 +156,6 @@
     content: |
       apiVersion: kubeadm.k8s.io/v1beta3
       kind: ClusterConfiguration
-      clusterName: {{ cluster_name }}
       networking:
         podSubnet: {{ _k8s_pod_cidr }}
     dest: /tmp/kubeadm-init-config.yaml
@@ -182,6 +187,20 @@
     group: "{{ k8s_user }}"
     mode: "0600"
   when: not (worker_only | default(false) | bool)
+
+# ── Remove control-plane taint for single-node clusters ──────────────────────
+- name: Remove control-plane NoSchedule taint (single-node)
+  become: true
+  become_user: "{{ k8s_user }}"
+  ansible.builtin.command:
+    cmd: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+  environment:
+    KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+  changed_when: true
+  failed_when: false
+  when:
+    - not (worker_only | default(false) | bool)
+    - not (multinode | default(false) | bool)
 
 # ── CNI deployment (delegated to network_policies.yml) ───────────────────────
 - name: Deploy CNI

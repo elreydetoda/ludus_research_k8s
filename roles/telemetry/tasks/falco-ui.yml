@@ -1,43 +1,59 @@
-- name: Install Docker
-  block:
-    - name: Install required packages
-      ansible.builtin.apt:
-        pkg:
-          - apt-transport-https
-          - ca-certificates
-          - curl
-          - software-properties-common
-        state: present
-        update_cache: yes
-    - name: add GPG key
-      ansible.builtin.apt_key:
-        url: "https://download.docker.com/linux/ubuntu/gpg"
-        state: present
-    - name: Add Docker repo
-      ansible.builtin.apt_repository:
-        repo: deb https://download.docker.com/linux/ubuntu focal stable
-        state: present
-    - name: Install Docker
-      ansible.builtin.apt:
-        pkg: 
-          - docker.io
-          - docker-compose-plugin
-        state: latest
-        update_cache: true
-    - name: add user to docker group
-      ansible.builtin.user:
-        user: "{{ telemetry_user }}"
-        group: docker
-- name: Install falcosidekick-ui
-  block:
-    - name: Copy docker-compose file 
-      ansible.builtin.copy:
-        src: ./deps/docker-compose.yml
-        dest: "/home/{{ telemetry_user }}/docker-compose.yml"
-        mode: "0644"
-        owner: "{{ telemetry_user }}"
-        group: "{{ telemetry_user }}"
-    - name: Run docker-compose
-      community.docker.docker_compose_v2:
-        project_src: "/home/{{ telemetry_user }}"
-      register: output
+---
+- name: Set kubectl command based on flavor
+  ansible.builtin.set_fact:
+    _kubectl: "{{ 'microk8s kubectl' if k8s_flavor | default('microk8s') == 'microk8s' else 'kubectl' }}"
+
+- name: Install falcosidekick with web UI in-cluster
+  become: true
+  become_user: "{{ k8s_user }}"
+  kubernetes.core.helm:
+    name: falcosidekick
+    chart_ref: falcosecurity/falcosidekick
+    release_namespace: "{{ falco_namespace }}"
+    create_namespace: true
+    kubeconfig: "/home/{{ k8s_user }}/.kube/config"
+    values:
+      replicaCount: 1
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      service:
+        type: "{{ 'NodePort' if falcosidekick_nodeport | default(0) | int > 0 else 'ClusterIP' }}"
+        port: 2801
+        nodePort: "{{ falcosidekick_nodeport | int if falcosidekick_nodeport | default(0) | int > 0 else omit }}"
+      webui:
+        enabled: true
+        service:
+          type: NodePort
+          nodePort: "{{ falcosidekick_webui_nodeport | int }}"
+        tolerations:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+            effect: NoSchedule
+        redis:
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+
+- name: Wait for falcosidekick to be ready
+  ansible.builtin.command:
+    cmd: "{{ _kubectl }} rollout status deployment falcosidekick -n {{ falco_namespace }} --timeout=180s"
+  environment:
+    KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+  changed_when: false
+
+- name: Wait for falcosidekick-ui to be ready
+  ansible.builtin.command:
+    cmd: "{{ _kubectl }} rollout status deployment falcosidekick-ui -n {{ falco_namespace }} --timeout=180s"
+  environment:
+    KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+  changed_when: false
+
+- name: Restart Falco DaemonSet to connect to Falcosidekick
+  ansible.builtin.command:
+    cmd: "{{ _kubectl }} rollout restart daemonset falco -n {{ falco_namespace }}"
+  environment:
+    KUBECONFIG: "/home/{{ k8s_user }}/.kube/config"
+  changed_when: true

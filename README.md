@@ -26,13 +26,14 @@ ludus ansible role add -d ./roles/telemetry
 | Variable | Type | Options / Notes |
 | -------- | ---- | --------------- |
 | `k8s_flavor` | string | `microk8s` (default) or `kubeadm` |
-| `k8s_user` | string | User that owns the kubeconfig (default: same as `microk8s_user`) |
+| `k8s_user` | string | Unprivileged user that owns the kubeconfig (default: `localuser`) |
 
 ### MicroK8s Variables
 
 | Variable | Type | Options / Notes |
 | -------- | ---- | --------------- |
-| `microk8s_addons` | list | MicroK8s addons to enable (default: `dns`, `storage`, `helm3`). See [MicroK8s Addons](https://canonical.com/microk8s/docs/addons) |
+| `microk8s_addons` | list | Addons to enable (default: `dns`, `storage`, `helm3`). See [MicroK8s Addons](https://canonical.com/microk8s/docs/addons) |
+| `microk8s_version` | string | Snap channel to pin (e.g. `"1.31/stable"`). Empty string installs latest stable |
 | `multinode` | boolean | Enable multi-node cluster setup |
 | `control_node` | boolean | Mark this node as the control plane (required when `multinode: true`) |
 | `worker_only` | boolean | Join as worker-only node (set when `multinode: true`) |
@@ -49,16 +50,33 @@ ludus ansible role add -d ./roles/telemetry
 
 ## `telemetry` Role
 
+### Core Variables
+
 | Variable | Type | Options / Notes |
 | -------- | ---- | --------------- |
-| `telemetry_role` | string | `agent` — deploys Falco on the cluster<br>`ui` — deploys Falcosidekick UI<br>`full` — deploys both |
-| `telemetry_hostname` | string | Hostname/IP of the node running the telemetry UI |
-| `ui` | string | `grafana` — deploys Loki + Grafana instead of Falcosidekick UI |
-| `falco_custom_rules` | list | Rule names (exact strings) to apply from the bundled `rules.yaml`. Default: `[]` (no custom rules). All macros and lists are always included for dependency resolution. |
+| `ui` | string | `grafana` — deploys Loki + Grafana<br>`falcosidekick` — deploys Falcosidekick with built-in web UI<br>omit for Falco only |
+| `falco_custom_rules` | list | Rule names (exact strings) to apply from the bundled `rules.yaml`. Default: `[]`. All macros and lists are always included for dependency resolution |
+
+### Falco Variables
+
+| Variable | Type | Options / Notes |
+| -------- | ---- | --------------- |
+| `falco_namespace` | string | Namespace for Falco and related components (default: `falco`) |
+| `falco_chart_version` | string | Helm chart version to pin (default: latest) |
+| `falco_nodeport` | integer | NodePort for the k8saudit webhook service (default: `30007`) |
+| `falcosidekick_nodeport` | integer | NodePort for Falcosidekick; `0` = ClusterIP only (default: `0`) |
+| `falcosidekick_webui_nodeport` | integer | NodePort for the Falcosidekick web UI when `ui: falcosidekick` (default: `30088`) |
+
+### Grafana Variables
+
+| Variable | Type | Options / Notes |
+| -------- | ---- | --------------- |
+| `grafana_namespace` | string | Namespace for Grafana and Loki (default: `grafana`) |
+| `grafana_nodeport` | integer | NodePort for Grafana web UI (default: `30147`) |
 
 ### Available Falco Rules
 
-Rules live in `roles/telemetry/tasks/deps/rules.yaml`. Reference rules by exact name:
+Rules live in `roles/telemetry/tasks/deps/rules.yaml`. Reference rules by exact name in `falco_custom_rules`:
 
 | Category | Rule Name |
 | -------- | --------- |
@@ -123,7 +141,7 @@ Exposes etcd without authentication and installs `etcd-client` and `kubetcd` for
 
 | Variable | Type | Description |
 | -------- | ---- | ----------- |
-| `unauth_etcd` | boolean | Expose etcd without authentication. In kubeadm multinode clusters, runs on control plane nodes only. Not supported with MicroK8s HA (multinode) as it uses dqlite instead of etcd. |
+| `unauth_etcd` | boolean | Expose etcd without authentication. In kubeadm multinode clusters, runs on control plane nodes only. Not supported with MicroK8s HA (multinode) as it uses dqlite instead of etcd |
 
 ### Anonymous Cluster Admin
 
@@ -195,7 +213,6 @@ Creates namespaces, ServiceAccounts, Roles/ClusterRoles, and RoleBindings/Cluste
 | `rbac_bindings` | list | `RoleBinding`/`ClusterRoleBinding` objects: `kind`, `name`, `namespace` (RoleBinding only), `role_ref`, `subjects` |
 
 ```yaml
-enable_custom_rbac: true
 rbac_namespaces:
   - dev
 rbac_service_accounts:
@@ -229,6 +246,8 @@ Deploys [Kyverno](https://kyverno.io) as a validating or mutating admission webh
 | `enable_admission_controller` | boolean | Deploy Kyverno |
 | `kyverno_policy_type` | string | `validating` or `mutating` |
 | `kyverno_policy_preset` | string | **Validating:** `block_privileged`, `require_labels`<br>**Mutating:** `inject_security_context`, `add_default_labels` |
+| `kyverno_custom_policies` | list | Additional Kyverno policy manifests to apply (inline dicts) |
+| `kyverno_excluded_namespaces` | list | Namespaces excluded from Kyverno policies (default: `kube-system`, `kyverno`, `falco`, `grafana`, `local-path-storage`) |
 | `enable_malicious_webhook` | boolean | Deploy a Flask mutating webhook that injects a privileged init container into pods in namespaces labelled `webhook: enabled` |
 
 ### Headlamp Dashboard
@@ -255,19 +274,6 @@ Deploy arbitrary Kubernetes manifests — inline dicts or paths to YAML files.
 
 ## Attack Simulation Modules
 
-### Attack Chain (CVE-2025-1974 IngressNightmare)
-
-Deploys a production-like environment and automates a full kill chain demonstrating CVE-2025-1974. All steps produce Falco telemetry.
-
-**Environment:** PostgreSQL in a `prod` namespace, CI/CD service account with MutatingWebhookConfiguration permissions, vulnerable ingress-nginx v1.11.4 on NodePort 32443, pre-deployed ransomware webhook.
-
-**Steps:** NodePort enumeration → RCE via nginx config injection → SA token theft → cross-namespace secret read → lateral movement to `prod` → malicious webhook registration → ransomware sidecar injection.
-
-| Variable | Type | Options / Notes |
-| -------- | ---- | --------------- |
-| `enable_attack_chain` | boolean | Deploy the full environment and run the attack |
-
-
 ### C2 Pod
 
 Deploys a simulated C2 beacon pod that produces realistic network and syscall telemetry for Falco detection engineering. Requires a reachable Mythic C2 server.
@@ -291,6 +297,7 @@ Provisions a standalone Mythic C2 server VM with the Poseidon agent, HTTP profil
 | -------- | ---- | --------------- |
 | `mythic_server` | boolean | Install Mythic C2 on this VM (skips K8s install) |
 | `mythic_server_ip` | string | IP of the Mythic VM — set on both the K8s node and the Mythic VM |
+| `mythic_server_hostname` | string | Hostname of the Mythic VM for DNS resolution (default: `{{ range_id }}-mythic`) |
 | `mythic_admin_user` | string | Web UI admin username (default: `mythic_admin`) |
 | `mythic_admin_password` | string | Auto-generated; saved to `/tmp/.mythic_admin_password` |
 | `mythic_http_profile_port` | integer | HTTP C2 listener port (default: `80`) |
@@ -327,37 +334,6 @@ ludus:
         - "Anonymous Request Failed"
         - "Kubelet Remote Exec Attempt"
         - "ETCD Access"
-      telemetry_role: agent
-      ui: grafana
-```
-
-### MicroK8s cluster with Falco and attack chain
-
-```yaml
-ludus:
-  - vm_name: "{{ range_id }}-k8s-microk8s-01"
-    hostname: "{{ range_id }}-k8s-microk8s-01"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20
-    ip_last_octet: 11
-    ram_gb: 8
-    cpus: 4
-    linux: true
-    roles:
-      - install_k8s
-      - telemetry
-    role_vars:
-      k8s_flavor: microk8s
-      microk8s_addons:
-        - dns
-        - storage
-        - helm3
-      enable_attack_chain: true
-      falco_custom_rules:
-        - "Modify Admission Webhook Configuration"
-        - "ClusterRole Binding To Cluster Admin"
-        - "Pod ServiceAccount Token File Access"
-      telemetry_role: agent
       ui: grafana
 ```
 
@@ -365,8 +341,8 @@ ludus:
 
 ```yaml
 ludus:
-  - vm_name: "{{ range_id }}-mythic-01"
-    hostname: "{{ range_id }}-mythic-01"
+  - vm_name: "{{ range_id }}-mythic"
+    hostname: "{{ range_id }}-mythic"
     template: ubuntu-24.04-x64-server-template
     vlan: 20
     ip_last_octet: 20
@@ -378,6 +354,7 @@ ludus:
     role_vars:
       mythic_server: true
       mythic_server_ip: 10.X.20.20
+      mythic_server_hostname: "{{ range_id }}-mythic"
       mythic_http_profile_port: 80
 
   - vm_name: "{{ range_id }}-k8s-01"
@@ -398,9 +375,9 @@ ludus:
         - storage
         - helm3
       mythic_server_ip: 10.X.20.20
+      mythic_server_hostname: "{{ range_id }}-mythic"
       enable_c2_pod: true
       c2_pod_sa_permissions: read-secrets
-      telemetry_role: agent
       ui: grafana
 ```
 
@@ -408,13 +385,13 @@ ludus:
 
 ## Service Ports
 
-| Service | NodePort | Notes |
-| ------- | -------- | ----- |
-| Grafana | 30147 | Web dashboard; credentials `admin` / `admin` |
+| Service | Default NodePort | Notes |
+| ------- | --------------- | ----- |
+| Grafana | 30147 | Web dashboard; credentials `admin` / `admin`. Configurable via `grafana_nodeport` |
 | Loki | 31000 | HTTP API |
-| Falco k8saudit webhook | 30007 | Kubernetes audit event ingestion |
+| Falco k8saudit webhook | 30007 | Kubernetes audit event ingestion. Configurable via `falco_nodeport` |
+| Falcosidekick web UI | 30088 | `ui: falcosidekick`; configurable via `falcosidekick_webui_nodeport` |
 | Headlamp dashboard | 30095 | `enable_headlamp` module; token printed at play end |
 | Vulnerable ping app (RCE) | 30100 | `demo_pod_rce` module |
-| ingress-nginx webhook | 32443 | Unauthenticated; `enable_attack_chain` module |
 | Mythic C2 web UI | 7443 | HTTPS; credentials saved to `/tmp/.mythic_admin_password` |
 | Kubelet API | 10250 | Direct access when `enable_unauth_kubelet: true` |
