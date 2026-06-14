@@ -2,116 +2,22 @@
 - name: Install Mythic C2 server
   when: mythic_server | bool
   block:
-    - name: Install required packages for Docker
-      ansible.builtin.apt:
-        pkg:
-          - apt-transport-https
-          - ca-certificates
-          - curl
-          - software-properties-common
-          - git
-          - make
-        state: present
-        update_cache: yes
-
-    - name: Add Docker GPG key
-      ansible.builtin.apt_key:
-        url: "https://download.docker.com/linux/ubuntu/gpg"
-        state: present
-
-    - name: Add Docker repo
-      ansible.builtin.apt_repository:
-        repo: deb https://download.docker.com/linux/ubuntu focal stable
-        state: present
-
-    - name: Install Docker
-      ansible.builtin.apt:
-        pkg:
-          - docker.io
-          - docker-compose-plugin
-        state: latest
-        update_cache: true
-
-    - name: Add user to docker group
-      ansible.builtin.user:
-        name: "{{ k8s_user }}"
-        groups: docker
-        append: true
-
-    - name: Clone Mythic repository at pinned version
-      ansible.builtin.git:
-        repo: "https://github.com/its-a-feature/Mythic"
-        dest: "/opt/Mythic"
-        version: "{{ mythic_version }}"
-        depth: 1
-        force: true
-
-    - name: Build Mythic CLI
-      ansible.builtin.command:
-        cmd: make
-        chdir: /opt/Mythic
-        creates: /opt/Mythic/mythic-cli
-
-    - name: Set Mythic admin username in .env
-      ansible.builtin.lineinfile:
-        path: /opt/Mythic/.env
-        regexp: "^MYTHIC_ADMIN_USER="
-        line: "MYTHIC_ADMIN_USER={{ mythic_admin_user }}"
-        create: true
-        mode: "0600"
-
-    - name: Set Mythic admin password in .env
-      ansible.builtin.lineinfile:
-        path: /opt/Mythic/.env
-        regexp: "^MYTHIC_ADMIN_PASSWORD="
-        line: "MYTHIC_ADMIN_PASSWORD={{ mythic_admin_password }}"
-        create: true
-        mode: "0600"
-
-    - name: Set Mythic HTTP profile port in .env
-      ansible.builtin.lineinfile:
-        path: /opt/Mythic/.env
-        regexp: "^MYTHIC_HTTP_BIND_PORT="
-        line: "MYTHIC_HTTP_BIND_PORT={{ mythic_http_profile_port }}"
-        create: true
-        mode: "0600"
-
-    - name: Start Mythic
-      ansible.builtin.command:
-        cmd: /opt/Mythic/mythic-cli start
-        chdir: /opt/Mythic
-        creates: /opt/Mythic/docker-compose.yml
-
-    - name: Install Poseidon agent via mythic-cli
-      ansible.builtin.command:
-        cmd: /opt/Mythic/mythic-cli install github https://github.com/MythicAgents/poseidon
-        chdir: /opt/Mythic
-        creates: /opt/Mythic/InstalledServices/poseidon
-
-    - name: Install HTTP C2 profile via mythic-cli
-      ansible.builtin.command:
-        cmd: /opt/Mythic/mythic-cli install github https://github.com/MythicC2Profiles/http
-        chdir: /opt/Mythic
-        creates: /opt/Mythic/InstalledServices/http
-
-    - name: Restart Mythic to load installed agents
-      ansible.builtin.command:
-        cmd: /opt/Mythic/mythic-cli start
-        chdir: /opt/Mythic
-      changed_when: true
-
-    - name: Install python3-pip
-      ansible.builtin.apt:
-        name: python3-pip
-        state: present
-        update_cache: false
-
-    - name: Install mythic Python library
-      ansible.builtin.pip:
-        name: mythic
-        state: present
-        executable: pip3
-        extra_args: "--break-system-packages"
+    - name: Install Mythic
+      ansible.builtin.include_role:
+        name: t94j0.mythic
+      vars:
+        admin_username: "{{ mythic_admin_user }}"
+        default_password: "{{ mythic_admin_password }}"
+        installation_path: "/opt/Mythic"
+        agents:
+          - repo: https://github.com/MythicC2Profiles/http
+            branch: master
+          - repo: https://github.com/MythicAgents/poseidon
+            branch: master
+          - repo: https://github.com/elreydetoda/container_wrapper
+            branch: master
+          - repo: https://github.com/elreydetoda/container_registry
+            branch: main
 
     - name: Wait for Mythic API to be ready
       ansible.builtin.uri:

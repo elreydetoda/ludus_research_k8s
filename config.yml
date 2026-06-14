@@ -23,112 +23,112 @@ ludus:
         - helm3
       ui: grafana
 
-  # VM 2: kubeadm — unauthenticated attack surfaces (API, kubelet, etcd, anon-admin)
-  - vm_name: "{{ range_id }}-k8s-kubeadm-unauth"
-    hostname: "{{ range_id }}-k8s-kubeadm-unauth"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20
-    ip_last_octet: 12
-    ram_gb: 4
-    cpus: 4
-    linux: true
-    testing:
-      snapshot: false
-      block_internet: false
-    roles:
-      - install_k8s
-      - telemetry
-    role_vars:
-      k8s_flavor: kubeadm
-      kubeadm_version: "1.31"
-      k8s_cni: calico
-      enable_unauth_api: true
-      enable_unauth_kubelet: true
-      unauth_etcd: true
-      anon_cluster_admin: true
-      falco_custom_rules:
-        - "Anonymous Request Allowed"
-        - "Anonymous Request Failed"
-        - "Anonymous Resource Access"
-        - "Kubelet Remote Exec Attempt"
-        - "Anonymous Kubelet API Enumeration"
-        - "ETCD Access"
-        - "ETCD Pod Tampering"
-        - "ClusterRole Binding To Anonymous User"
-        - "ClusterRole Binding To Cluster Admin"
-      ui: grafana
+  # # VM 2: kubeadm — unauthenticated attack surfaces (API, kubelet, etcd, anon-admin)
+  # - vm_name: "{{ range_id }}-k8s-kubeadm-unauth"
+  #   hostname: "{{ range_id }}-k8s-kubeadm-unauth"
+  #   template: ubuntu-24.04-x64-server-template
+  #   vlan: 20
+  #   ip_last_octet: 12
+  #   ram_gb: 4
+  #   cpus: 4
+  #   linux: true
+  #   testing:
+  #     snapshot: false
+  #     block_internet: false
+  #   roles:
+  #     - install_k8s
+  #     - telemetry
+  #   role_vars:
+  #     k8s_flavor: kubeadm
+  #     kubeadm_version: "1.31"
+  #     k8s_cni: calico
+  #     enable_unauth_api: true
+  #     enable_unauth_kubelet: true
+  #     unauth_etcd: true
+  #     anon_cluster_admin: true
+  #     falco_custom_rules:
+  #       - "Anonymous Request Allowed"
+  #       - "Anonymous Request Failed"
+  #       - "Anonymous Resource Access"
+  #       - "Kubelet Remote Exec Attempt"
+  #       - "Anonymous Kubelet API Enumeration"
+  #       - "ETCD Access"
+  #       - "ETCD Pod Tampering"
+  #       - "ClusterRole Binding To Anonymous User"
+  #       - "ClusterRole Binding To Cluster Admin"
+  #     ui: grafana
 
-  # VM 3: kubeadm — Kyverno admission controller + malicious webhook + PSA + Falcosidekick UI
-  - vm_name: "{{ range_id }}-k8s-kubeadm-admission"
-    hostname: "{{ range_id }}-k8s-kubeadm-admission"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20
-    ip_last_octet: 13
-    ram_gb: 4
-    cpus: 4
-    linux: true
-    testing:
-      snapshot: false
-      block_internet: false
-    roles:
-      - install_k8s
-      - telemetry
-    role_vars:
-      k8s_flavor: kubeadm
-      kubeadm_version: "1.31"
-      k8s_cni: calico
-      enable_admission_controller: true
-      kyverno_policy_type: validating
-      kyverno_policy_preset: block_privileged
-      enable_malicious_webhook: true
-      enable_pod_security_admission: true
-      psa_namespaces:
-        - name: prod
-          enforce: restricted
-          audit: restricted
-          warn: restricted
-        - name: staging
-          enforce: baseline
-          audit: restricted
-          warn: restricted
-      falco_custom_rules:
-        - "Modify Admission Webhook Configuration"
-        - "Read Admission Webhook Configurations"
-        - "Delete Admission Webhook Configuration"
-        - "Privileged or Host-Level Container Creation"
-      ui: falcosidekick
+  # # VM 3: kubeadm — Kyverno admission controller + malicious webhook + PSA + Falcosidekick UI
+  # - vm_name: "{{ range_id }}-k8s-kubeadm-admission"
+  #   hostname: "{{ range_id }}-k8s-kubeadm-admission"
+  #   template: ubuntu-24.04-x64-server-template
+  #   vlan: 20
+  #   ip_last_octet: 13
+  #   ram_gb: 4
+  #   cpus: 4
+  #   linux: true
+  #   testing:
+  #     snapshot: false
+  #     block_internet: false
+  #   roles:
+  #     - install_k8s
+  #     - telemetry
+  #   role_vars:
+  #     k8s_flavor: kubeadm
+  #     kubeadm_version: "1.31"
+  #     k8s_cni: calico
+  #     enable_admission_controller: true
+  #     kyverno_policy_type: validating
+  #     kyverno_policy_preset: block_privileged
+  #     enable_malicious_webhook: true
+  #     enable_pod_security_admission: true
+  #     psa_namespaces:
+  #       - name: prod
+  #         enforce: restricted
+  #         audit: restricted
+  #         warn: restricted
+  #       - name: staging
+  #         enforce: baseline
+  #         audit: restricted
+  #         warn: restricted
+  #     falco_custom_rules:
+  #       - "Modify Admission Webhook Configuration"
+  #       - "Read Admission Webhook Configurations"
+  #       - "Delete Admission Webhook Configuration"
+  #       - "Privileged or Host-Level Container Creation"
+  #     ui: falcosidekick
 
-  # VM 4: MicroK8s — Pod RCE, kubelet proxy lateral movement, Headlamp dashboard
-  - vm_name: "{{ range_id }}-k8s-microk8s-rce"
-    hostname: "{{ range_id }}-k8s-microk8s-rce"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20
-    ip_last_octet: 14
-    ram_gb: 4
-    cpus: 4
-    linux: true
-    testing:
-      snapshot: false
-      block_internet: false
-    roles:
-      - install_k8s
-      - telemetry
-    role_vars:
-      k8s_flavor: microk8s
-      microk8s_addons:
-        - dns
-        - storage
-        - helm3
-      demo_pod_rce: true
-      gh_nodes_proxy: true
-      enable_headlamp: true
-      falco_custom_rules:
-        - "Pod ServiceAccount Token File Access"
-        - "Symlink To Host Files"
-        - "Pod Using hostPath to Mount Root Filesystem"
-        - "Container Accessing Mounted Host Root Filesystem"
-        - "RBAC Wildcard Permissions Detected"
-      ui: grafana
+  # # VM 4: MicroK8s — Pod RCE, kubelet proxy lateral movement, Headlamp dashboard
+  # - vm_name: "{{ range_id }}-k8s-microk8s-rce"
+  #   hostname: "{{ range_id }}-k8s-microk8s-rce"
+  #   template: ubuntu-24.04-x64-server-template
+  #   vlan: 20
+  #   ip_last_octet: 14
+  #   ram_gb: 4
+  #   cpus: 4
+  #   linux: true
+  #   testing:
+  #     snapshot: false
+  #     block_internet: false
+  #   roles:
+  #     - install_k8s
+  #     - telemetry
+  #   role_vars:
+  #     k8s_flavor: microk8s
+  #     microk8s_addons:
+  #       - dns
+  #       - storage
+  #       - helm3
+  #     demo_pod_rce: true
+  #     gh_nodes_proxy: true
+  #     enable_headlamp: true
+  #     falco_custom_rules:
+  #       - "Pod ServiceAccount Token File Access"
+  #       - "Symlink To Host Files"
+  #       - "Pod Using hostPath to Mount Root Filesystem"
+  #       - "Container Accessing Mounted Host Root Filesystem"
+  #       - "RBAC Wildcard Permissions Detected"
+  #     ui: grafana
 
   # VM 5: Mythic C2 server (standalone — skips K8s install)
   - vm_name: "{{ range_id }}-mythic"
@@ -150,36 +150,36 @@ ludus:
       mythic_server_hostname: "{{ range_id }}-mythic"
       mythic_http_profile_port: 80
 
-  # VM 6: kubeadm — C2 beacon pod connecting to Mythic + Falco detection rules
-  - vm_name: "{{ range_id }}-k8s-kubeadm-c2"
-    hostname: "{{ range_id }}-k8s-kubeadm-c2"
-    template: ubuntu-24.04-x64-server-template
-    vlan: 20
-    ip_last_octet: 15
-    ram_gb: 8
-    cpus: 4
-    linux: true
-    testing:
-      snapshot: false
-      block_internet: false
-    roles:
-      - install_k8s
-      - telemetry
-    role_vars:
-      k8s_flavor: kubeadm
-      kubeadm_version: "1.31"
-      k8s_cni: calico
-      mythic_server_ip: 10.X.20.20
-      mythic_server_hostname: "{{ range_id }}-mythic"
-      enable_c2_pod: true
-      c2_pod_sa_permissions: read-secrets
-      c2_callback_interval: 60
-      c2_callback_jitter: 20
-      falco_custom_rules:
-        - "CLI Token Usage by Local Process"
-        - "Pod ServiceAccount Token File Access"
-        - "Privileged or Host-Level Container Creation"
-        - "ClusterRole Binding To Cluster Admin"
-        - "RBAC Wildcard Permissions Detected"
-        - "Namespaced SA Bound to ClusterRole"
-      ui: grafana
+  # # VM 6: kubeadm — C2 beacon pod connecting to Mythic + Falco detection rules
+  # - vm_name: "{{ range_id }}-k8s-kubeadm-c2"
+  #   hostname: "{{ range_id }}-k8s-kubeadm-c2"
+  #   template: ubuntu-24.04-x64-server-template
+  #   vlan: 20
+  #   ip_last_octet: 15
+  #   ram_gb: 8
+  #   cpus: 4
+  #   linux: true
+  #   testing:
+  #     snapshot: false
+  #     block_internet: false
+  #   roles:
+  #     - install_k8s
+  #     - telemetry
+  #   role_vars:
+  #     k8s_flavor: kubeadm
+  #     kubeadm_version: "1.31"
+  #     k8s_cni: calico
+  #     mythic_server_ip: 10.X.20.20
+  #     mythic_server_hostname: "{{ range_id }}-mythic"
+  #     enable_c2_pod: true
+  #     c2_pod_sa_permissions: read-secrets
+  #     c2_callback_interval: 60
+  #     c2_callback_jitter: 20
+  #     falco_custom_rules:
+  #       - "CLI Token Usage by Local Process"
+  #       - "Pod ServiceAccount Token File Access"
+  #       - "Privileged or Host-Level Container Creation"
+  #       - "ClusterRole Binding To Cluster Admin"
+  #       - "RBAC Wildcard Permissions Detected"
+  #       - "Namespaced SA Bound to ClusterRole"
+  #     ui: grafana
