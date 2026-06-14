@@ -10,8 +10,8 @@ ludus:
     cpus: 4
     linux: true
     testing:
-      snapshot: false
-      block_internet: false
+      snapshot: true
+      block_internet: true
     roles:
       - install_k8s
       - telemetry
@@ -21,6 +21,7 @@ ludus:
         - dns
         - storage
         - helm3
+        - registry
       ui: grafana
 
   # # VM 2: kubeadm — unauthenticated attack surfaces (API, kubelet, etcd, anon-admin)
@@ -134,7 +135,7 @@ ludus:
   - vm_name: "{{ range_id }}-mythic"
     hostname: "{{ range_id }}-mythic"
     template: ubuntu-24.04-x64-server-template
-    vlan: 20
+    vlan: 30
     ip_last_octet: 20
     ram_gb: 8
     cpus: 4
@@ -146,7 +147,7 @@ ludus:
       - install_k8s
     role_vars:
       mythic_server: true
-      mythic_server_ip: 10.X.20.20
+      mythic_server_ip: 10.9.30.20
       mythic_server_hostname: "{{ range_id }}-mythic"
       mythic_http_profile_port: 80
 
@@ -183,3 +184,19 @@ ludus:
   #       - "RBAC Wildcard Permissions Detected"
   #       - "Namespaced SA Bound to ClusterRole"
   #     ui: grafana
+
+network:
+  inter_vlan_default: REJECT
+  rules:
+    - name: Only allow Kubernetes to Mythic on 80
+      vlan_src: 20
+      vlan_dst: 30
+      protocol: tcp
+      ports: 80
+      action: ACCEPT
+    - name: Allow Mythic to reach Kubernetes on all ports
+      vlan_src: 30
+      vlan_dst: 20
+      protocol: tcp
+      ports: all
+      action: ACCEPT

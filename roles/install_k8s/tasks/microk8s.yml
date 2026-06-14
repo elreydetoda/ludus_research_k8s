@@ -50,11 +50,11 @@
         owner: "{{ k8s_user }}"
         group: "{{ k8s_user }}"
         mode: "0700"
-    - name: Modify API Server
-      ansible.builtin.lineinfile:
-        path: "{{ microk8s_apiserver }}"
-        regexp: '^--authorization-mode='
-        line: '--authorization-mode=Node,RBAC'
+    # - name: Modify API Server
+    #   ansible.builtin.lineinfile:
+    #     path: "{{ microk8s_apiserver }}"
+    #     regexp: '^--authorization-mode='
+    #     line: '--authorization-mode=Node,RBAC'
     - name: Create KubeConfig
       ansible.builtin.shell: "microk8s config > /home/{{ k8s_user }}/.kube/config"
     - name: Add kubectl alias
